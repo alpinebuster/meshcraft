@@ -2464,6 +2464,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "meshlib"
+version = "3.1.4-560"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73cfccceeabb626ee77fc3171d08586f09f8ae7c5a0573cde78a595b335174c6"
+dependencies = [
+ "sha2 0.11.1",
+ "ureq",
+ "zip",
+]
+
+[[package]]
 name = "minisign-verify"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4358,6 +4369,7 @@ name = "solidcraft-kernel"
 version = "0.23.0"
 dependencies = [
  "log",
+ "meshlib",
  "proptest",
  "rayon",
  "serde",
@@ -4983,6 +4995,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a7ac20be9b7726e0bbdbf974c059676d9acb1cd414961f570a4e8231cacd7fc"
 dependencies = [
  "base64",
+ "flate2",
  "log",
  "percent-encoding",
  "rustls",
@@ -4990,6 +5003,7 @@ dependencies = [
  "rustls-platform-verifier",
  "ureq-proto",
  "utf8-zero",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -5349,6 +5363,15 @@ name = "webpki-root-certs"
 version = "1.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
+dependencies = [
+ "rustls-pki-types",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5f280bbb2b287bc8e7de7e3852945a0ff50d1bbcb5ed42b6c7a568c546df171"
 dependencies = [
  "rustls-pki-types",
 ]
