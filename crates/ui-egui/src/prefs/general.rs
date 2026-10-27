@@ -30,6 +30,13 @@ pub(super) fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
             });
             ui_kit::settings_autosave_timeline(ui, app.autosave_minutes);
         });
+        ui_kit::settings_block(ui, app.tr_label("Reopen designs"), labels, |ui| {
+            ui_kit::checkbox(
+                ui,
+                crate::i18n::tr_label("Reopen the designs that were open when SolidCraft was last closed"),
+                &mut app.preferences.reopen_designs,
+            );
+        });
         ui_kit::settings_block(ui, app.tr_label("Crash reports"), labels, |ui| {
             ui.horizontal(|ui| {
                 let count = app.crashes.saved_count();
@@ -40,6 +47,12 @@ pub(super) fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
                 }
             });
             ui_kit::text(ui, app.tr("prefs.crash_reports_note"), ui_kit::Text::Hint("crash_reports"));
+        });
+    });
+    ui_kit::settings_section(ui, "slicer", app.tr("ui.slicer"), |ui| {
+        ui_kit::settings_block(ui, app.tr("ui.slicer"), labels, |ui| {
+            let (single, tip) = (app.tr("ui.slicer_single_instance").to_string(), app.tr("ui.slicer_single_instance_tip").to_string());
+            ui_kit::checkbox(ui, &single, &mut app.preferences.slicer_single_instance).on_hover_text(tip);
         });
     });
     ui_kit::settings_section(ui, "updates", app.tr("prefs.updates"), |ui| {
