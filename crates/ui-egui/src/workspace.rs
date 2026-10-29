@@ -4,6 +4,34 @@
 use solidcraft_engine::CommandSpec;
 use solidcraft_engine::doc::FeatureKind;
 
+pub const RENDER_TABS: &[&str] = &["RENDER"];
+
+pub fn render_tab(tab: &str) -> bool {
+    RENDER_TABS.contains(&tab)
+}
+pub fn tab_label(tab: &str) -> &str {
+    tab.strip_prefix("RENDER ").unwrap_or(tab)
+}
+
+/// A tab's registry name in normal word casing: "SHEET METAL" → "Sheet Metal".
+pub fn word_cased(name: &str) -> String {
+    name.split_whitespace()
+        .map(|word| {
+            let lower = word.to_lowercase();
+            let mut chars = lower.chars();
+            chars.next().map(|c| c.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A ribbon tab's name as the ribbon shows it, in the current language: "SHEET METAL" reads
+/// "Sheet Metal", or "Blech" in German. A partial catalog may translate only the word-cased name.
+pub fn tab_name(tab: &str) -> String {
+    let cased = word_cased(crate::i18n::tr_label(tab_label(tab)));
+    crate::i18n::tr_label(&cased).to_string()
+}
+
 pub const TABS: &[&str] = &["MODEL", "SURFACE", "ASSEMBLE", "INSERT", "INSPECT", "MANAGE", "VIEW"];
 
 /// Reading order of the compact, three-column constraint gallery. Icons come from each spec.
@@ -91,6 +119,8 @@ pub const SECTIONS: &[Section] = &[
     },
     Section { tab: "MODEL", panel: "CONFIGURE", promoted: 2, ids: CONFIGURE },
     Section { tab: "MODEL", panel: "CONSTRUCT", promoted: 1, ids: &["construct.plane.offset"] },
+    // Only while a linked design is edited in place, pinned at the right as FINISH SKETCH is.
+    Section { tab: "MODEL", panel: "FINISH EDITING", promoted: 1, ids: &["component.finish_edit"] },
     // Sketches drive surfaces too: New Sketch leads the tab, as on MODEL and SHEET METAL.
     Section { tab: "SURFACE", panel: "SKETCH", promoted: 1, ids: &["sketch.create"] },
     Section { tab: "SURFACE", panel: "CREATE", promoted: 4, ids: &["surface.extrude", "surface.revolve", "surface.sweep", "surface.loft"] },
@@ -141,7 +171,7 @@ pub const SECTIONS: &[Section] = &[
         tab: "INSERT",
         panel: "FILES",
         promoted: 3,
-        ids: &["file.insert_step", "file.insert_mesh", "component.insert_design", "file.save_mesh", "file.send_to_slicer"],
+        ids: &["file.insert_step", "file.insert_mesh", "pointcloud.insert", "component.insert_design", "file.save_mesh", "file.send_to_slicer"],
     },
     Section { tab: "INSERT", panel: "IMAGES", promoted: 3, ids: &["canvas.insert", "canvas.decal", "canvas.edit"] },
     Section { tab: "INSERT", panel: "2D", promoted: 2, ids: &["sketch.insert_dxf", "sketch.insert_svg"] },
@@ -169,7 +199,7 @@ pub const SECTIONS: &[Section] = &[
             "inspect.continuity",
         ],
     },
-    Section { tab: "INSPECT", panel: "HISTORY", promoted: 2, ids: &["timeline.dependents", "document.inspect"] },
+    Section { tab: "INSPECT", panel: "HISTORY", promoted: 3, ids: &["timeline.play", "timeline.dependents", "document.inspect"] },
     Section {
         tab: "MANAGE",
         panel: "PARAMETERS",
@@ -278,25 +308,12 @@ pub const SECTIONS: &[Section] = &[
     Section { tab: "WELDMENTS", panel: "SKETCH", promoted: 1, ids: &["sketch.create"] },
     Section { tab: "WELDMENTS", panel: "CREATE", promoted: 1, ids: &["frame.member"] },
     Section { tab: "WELDMENTS", panel: "CONFIGURE", promoted: 2, ids: CONFIGURE },
-    // One Render tab with task-ordered groups; only implemented registry commands.
-    // The shared ribbon owns pins, search, section menus and responsive overflow.
+];
+
+// Migration data only: Render commands remain registered, but have no live ribbon sections.
+const LEGACY_RENDER_SECTIONS: &[Section] = &[
     Section {
-        tab: "RENDER",
-        panel: "SCENE",
-        promoted: 2,
-        ids: &[
-            "render.preset.resolve",
-            "render.settings.get",
-            "render.scene",
-            "render.preset.apply",
-            "render.settings.set",
-            "render.shot.duplicate",
-            "render.shot.rename",
-            "render.shot.remove",
-        ],
-    },
-    Section {
-        tab: "RENDER",
+        tab: "RENDER APPEARANCE",
         panel: "APPEARANCE",
         promoted: 3,
         ids: &[
@@ -308,42 +325,54 @@ pub const SECTIONS: &[Section] = &[
             "render.library.physical.prepare",
         ],
     },
-    Section { tab: "RENDER", panel: "LIGHTING", promoted: 2, ids: &["render.library.studio.prepare", "render.library.studio.apply"] },
     Section {
-        tab: "RENDER",
-        panel: "ENVIRONMENT",
-        promoted: 2,
-        ids: &[
-            "render.library.environment.apply",
-            "render.stage.backdrop",
-            "render.stage.ground",
-            "render.stage.clear",
-            "render.hdr.inspect",
-            "render.settings.capture_hdr",
-        ],
-    },
-    Section { tab: "RENDER", panel: "CAMERA", promoted: 2, ids: &["render.camera.get", "render.camera.fit", "render.settings.apply"] },
-    Section {
-        tab: "RENDER",
-        panel: "IMAGE",
+        tab: "RENDER SCENE",
+        panel: "STUDIO",
         promoted: 3,
         ids: &[
-            "render.start",
-            "render.preflight",
-            "render.effects.describe",
-            "render.cancel",
-            "render.export",
-            "render.result.regrade",
-            "render.quality.prepare",
-            "render.status",
-            "render.backends",
+            "render.preset.resolve",
+            "render.library.studio.prepare",
+            "render.library.studio.apply",
+            "render.preset.apply",
+            "render.library.environment.apply",
         ],
     },
+    Section { tab: "RENDER SCENE", panel: "LIGHTS", promoted: 1, ids: &["render.lights.solo"] },
+    Section {
+        tab: "RENDER SCENE",
+        panel: "STAGE",
+        promoted: 2,
+        ids: &["render.stage.ground", "render.stage.backdrop", "render.stage.clear", "render.hdr.inspect", "render.settings.capture_hdr"],
+    },
+    Section {
+        tab: "RENDER CAMERA",
+        panel: "SHOTS",
+        promoted: 3,
+        ids: &["render.settings.get", "render.settings.set", "render.shot.duplicate", "render.shot.rename", "render.shot.remove"],
+    },
+    Section { tab: "RENDER CAMERA", panel: "VIEW", promoted: 2, ids: &["render.settings.apply", "render.scene"] },
+    Section { tab: "RENDER CAMERA", panel: "LENS", promoted: 1, ids: &["render.camera.get", "render.camera.set"] },
+    Section { tab: "RENDER CAMERA", panel: "FRAME", promoted: 1, ids: &["render.camera.fit"] },
+    Section { tab: "RENDER", panel: "IMAGE", promoted: 2, ids: &["render.quality.prepare", "render.effects.describe"] },
+    Section { tab: "RENDER", panel: "RENDER", promoted: 2, ids: &["render.start", "render.preflight", "render.cancel"] },
+    Section {
+        tab: "RENDER",
+        panel: "RESULT",
+        promoted: 2,
+        ids: &["render.export", "render.result.regrade", "render.compare", "render.status", "render.backends"],
+    },
+    Section { tab: "RENDER", panel: "BATCH", promoted: 1, ids: &["render.batch"] },
 ];
 
 /// Compact source labels for painted big buttons only. Menus, search and tooltips
 /// retain the engine label. Route these through `tr_label`, like other UI labels.
 pub const RIBBON_LABELS: &[(&str, &str)] = &[
+    ("render.batch", "All Shots"),
+    ("render.cancel", "Cancel"),
+    ("render.export", "Export Image"),
+    ("render.result.regrade", "Regrade"),
+    ("render.quality.prepare", "Quality"),
+    ("render.settings.set", "Save Shot"),
     ("render.aging.describe", "Aging"),
     ("render.effects.describe", "Effects"),
     ("render.camera.fit", "Frame"),
@@ -356,6 +385,7 @@ pub const RIBBON_LABELS: &[(&str, &str)] = &[
     ("render.library.studio.apply", "Edit Lights"),
     ("render.library.environment.apply", "HDR Library"),
     ("render.stage.backdrop", "Backgrounds"),
+    ("render.stage.ground", "Ground"),
     ("render.settings.apply", "Saved Camera"),
     ("render.preflight", "Check"),
     ("appearance.assign", "Appearance"),
@@ -388,6 +418,7 @@ pub const RIBBON_LABELS: &[(&str, &str)] = &[
     ("parts.resize", "Resize Part"),
     ("plastic.assign_rule", "Assign Rule"),
     ("plastic.manage_rules", "Plastic Rules"),
+    ("pointcloud.insert", "Point Clouds"),
     ("render.scene", "Scene"),
     ("sheet.export_bend_table", "Bend Table"),
     ("sheet.export_dxf", "Export DXF"),
@@ -444,8 +475,8 @@ pub const PLACEMENTS: &[(&str, &str, &str, &str)] = &[
     ("PLASTIC", "CREATE", "MODEL", "CREATE"),
     ("PLASTIC", "SETUP", "MANAGE", "RULES"),
     ("MESH", "MODIFY", "INSERT", "FILES"),
-    ("RENDER", "SCENE", "RENDER", "SCENE"),
-    ("RENDER", "IMAGE", "RENDER", "IMAGE"),
+    ("RENDER", "SCENE", "RENDER CAMERA", "SHOTS"),
+    ("RENDER", "IMAGE", "RENDER", "RENDER"),
 ];
 
 pub fn panels(tab: &str) -> Vec<&'static str> {
@@ -453,6 +484,13 @@ pub fn panels(tab: &str) -> Vec<&'static str> {
 }
 
 pub fn destination(c: &CommandSpec) -> Option<(&'static str, &'static str)> {
+    if c.id.starts_with("render.") || c.tab.starts_with("RENDER") || c.id == "view.shots_strip" {
+        return None;
+    }
+    legacy_render_destination(c).filter(|(tab, _)| !tab.starts_with("RENDER"))
+}
+
+pub(crate) fn legacy_render_destination(c: &CommandSpec) -> Option<(&'static str, &'static str)> {
     // A few shared commands have a canonical home that differs from their first occurrence.
     let primary = match c.id {
         "sheet.manage_rules" => Some(("MANAGE", "RULES")),
@@ -462,7 +500,7 @@ pub fn destination(c: &CommandSpec) -> Option<(&'static str, &'static str)> {
         _ => None,
     };
     primary
-        .or_else(|| SECTIONS.iter().find(|s| s.ids.contains(&c.id)).map(|s| (s.tab, s.panel)))
+        .or_else(|| SECTIONS.iter().chain(LEGACY_RENDER_SECTIONS).find(|s| s.ids.contains(&c.id)).map(|s| (s.tab, s.panel)))
         .or_else(|| PLACEMENTS.iter().find(|(t, p, ..)| *t == c.tab && *p == c.panel).map(|(_, _, t, p)| (*t, *p)))
 }
 
@@ -555,10 +593,14 @@ pub fn frame_body(app: &crate::SolveApp) -> Option<String> {
 
 pub fn visible_tabs(app: &crate::SolveApp) -> Vec<&'static str> {
     if crate::render_workspace::active(app) {
-        return vec!["RENDER"];
+        return Vec::new();
     }
     let mut tabs = TABS.to_vec();
-    if app.session.active_sketch.is_some() {
+    if app.preferences.sketch_tab_always {
+        // Right after MODEL, whether a sketch is open or not (#7904).
+        let at = tabs.iter().position(|t| *t == "MODEL").map_or(0, |i| i + 1);
+        tabs.insert(at, "SKETCH");
+    } else if app.session.active_sketch.is_some() {
         tabs.push("SKETCH");
     }
     // Always reachable, as before the ribbon redesign: a sheet-metal part starts from an
@@ -567,6 +609,17 @@ pub fn visible_tabs(app: &crate::SolveApp) -> Vec<&'static str> {
     tabs.push("SHEET METAL");
     tabs.push("WELDMENTS");
     tabs
+}
+
+/// With the SKETCH tab kept shown (#7904) and no sketch open: whether `id` is one of the tools in
+/// its CREATE or REFERENCE sections, which then start a sketch first (Create Sketch, then the
+/// tool). Tools that work on a sketch's geometry (modify, pattern, constrain) wait for one.
+pub fn starts_a_sketch(app: &crate::SolveApp, id: &str) -> bool {
+    app.preferences.sketch_tab_always
+        && app.session.active_sketch.is_none()
+        && solidcraft_engine::find_command(id)
+            .and_then(destination)
+            .is_some_and(|(tab, panel)| tab == "SKETCH" && matches!(panel, "CREATE" | "REFERENCE"))
 }
 
 /// Select contextual tabs on entry (or a different sheet body or frame member), allowing the
@@ -623,7 +676,7 @@ pub fn select_command_tab(app: &mut crate::SolveApp, id: &str) {
         return;
     }
     if let Some((tab, _)) = destination(c) {
-        if tab == "RENDER" {
+        if render_tab(tab) && !crate::render_workspace::active(app) {
             return;
         } // The Render workspace owns its entry/exit lifecycle.
         if visible_tabs(app).contains(&tab) {
@@ -740,7 +793,7 @@ mod tests {
     fn every_placed_command_is_reachable_and_every_layout_id_exists() {
         let specs = solidcraft_engine::command_specs();
         let lists: Vec<_> = SECTIONS.iter().map(|s| (s, layout(s.tab, s.panel, &specs).unwrap())).collect();
-        for c in specs.iter().filter(|c| !c.tab.is_empty()) {
+        for c in specs.iter().filter(|c| !c.tab.is_empty() && !c.tab.starts_with("RENDER")) {
             assert!(lists.iter().any(|(_, (cmds, _))| cmds.iter().any(|x| x.id == c.id)), "lost toolbar command {} ({}/{})", c.id, c.tab, c.panel);
         }
         for (s, (cmds, n)) in lists {

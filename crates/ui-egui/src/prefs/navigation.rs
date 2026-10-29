@@ -16,7 +16,7 @@ pub(super) fn show(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                 };
                 let mut keys = Vec::new();
                 if binding.keys.shift {
-                    keys.push("Shift");
+                    keys.push(crate::i18n::tr("prefs.shift"));
                 }
                 if binding.keys.ctrl {
                     keys.push("Ctrl/Cmd");
@@ -53,7 +53,7 @@ pub(super) fn show(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             ui_kit::settings_form(ui, 110.0, |ui| {
                 ui_kit::row(ui, app.tr("prefs.mouse_mapping"), |ui| {
                     let picker = ui_kit::dropdown_menu(ui, "pref_nav", nav_preset(&app.preferences.nav).translated_label(), |ui| {
-                        for preset in &NAV_PRESETS {
+                        for preset in NAV_PRESETS {
                             if ui_kit::list_picker(ui, preset.id, preset.translated_label(), app.preferences.nav == preset.id).clicked() {
                                 app.preferences.nav = preset.id.into();
                                 app.preferences.zoom_reverse = preset.reverse_zoom;
@@ -71,6 +71,11 @@ pub(super) fn show(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
         crate::scenario::publish_target("prefs:free_orbit", free_orbit.rect);
         if app.preferences.free_orbit {
             ui_kit::text(ui, crate::i18n::tr("nav.free_orbit.snap_help"), ui_kit::Text::Hint("free_orbit"));
+            let upright = setting::free_orbit_upright(app, ui);
+            crate::scenario::publish_target("prefs:free_orbit_upright", upright.rect);
+            if app.preferences.free_orbit_upright {
+                ui_kit::text(ui, crate::i18n::tr("nav.free_orbit_upright.help"), ui_kit::Text::Hint("free_orbit_upright"));
+            }
         }
         let help = if app.preferences.nav == TOUCHPAD_NAV {
             app.tr("nav.touchpad.help").to_owned()
@@ -114,6 +119,8 @@ pub(super) fn show(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                 setting::zoom_to_cursor(app, ui);
                 setting::zoom_reverse(app, ui);
                 setting::pan_reverse_x(app, ui);
+                setting::pan_reverse_y(app, ui);
+                setting::orbit_reverse(app, ui);
             });
             ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
                 setting::smooth_wheel_zoom(app, ui);
@@ -126,6 +133,8 @@ pub(super) fn show(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
                 setting::direct_interaction(app, ui);
             });
         });
+        let cursor = ui_kit::checkbox(ui, crate::i18n::tr_label("Show tool at cursor"), &mut app.ui.tool_cursor);
+        crate::scenario::publish_target("view:tool_cursor", cursor.rect);
         ui_kit::divider(ui, "navigation_view_controls");
         ui_kit::settings_form(ui, 150.0, |ui| {
             ui_kit::row(ui, app.tr_label("View navigator"), |ui| {

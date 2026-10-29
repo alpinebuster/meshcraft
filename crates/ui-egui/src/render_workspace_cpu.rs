@@ -32,42 +32,50 @@ pub(super) fn image_limits(app: &SolveApp) -> solidcraft_engine::render::RenderL
 
 fn budget_key(budget: CpuBudget) -> &'static str {
     match budget {
-        CpuBudget::Compact => "render.cpu_budget_compact",
-        CpuBudget::Studio => "render.cpu_budget_studio",
-        CpuBudget::Workstation => "render.cpu_budget_workstation",
+        CpuBudget::Compact => "render.children.compact",
+        CpuBudget::Studio => "render.children.studio",
+        CpuBudget::Workstation => "render.children.workstation",
     }
 }
 
 fn budget_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
-    ui.label(app.tr("render.cpu_budget"));
-    let selected = app.render_workspace.view.raytrace.budget;
-    let label = app.tr(budget_key(selected)).to_string();
-    let control = ui_kit::dropdown_menu(ui, "render_cpu_budget", &label, |ui| {
-        for budget in CpuBudget::ALL {
-            let key = budget_key(budget);
-            let response = ui_kit::list_picker(ui, key, app.tr(key), budget == selected);
-            crate::scenario::publish_handle(key, response.rect.center());
-            if response.clicked() {
-                // Preserve incompatible dimensions/samples for explicit correction.
-                app.render_workspace.view.raytrace.budget = budget;
-                app.render_workspace.view.dirty = true;
-                ui.close();
-            }
-        }
+    let budgets = CpuBudget::ALL;
+    let mut selected = budgets.iter().position(|b| *b == app.render_workspace.view.raytrace.budget).unwrap_or(0);
+    let labels = budgets.map(|b| app.tr(budget_key(b)).to_string());
+    let response = ui.scope(|ui| {
+        ui_kit::segmented(
+            ui,
+            &mut selected,
+            &labels.iter().map(String::as_str).collect::<Vec<_>>(),
+            ui_kit::Segments {
+                compact: true,
+                targets: &["render.cpu_budget_compact", "render.cpu_budget_studio", "render.cpu_budget_workstation"],
+                ..Default::default()
+            },
+        )
     });
-    crate::scenario::publish_target("render:cpu-budget", control.rect);
-    ui.small(app.tr("render.cpu_budget_help"));
-    let title = app.tr("render.cpu_budget_details").to_string();
-    ui_kit::section(ui, "render_cpu_budget_details", &title, false, |ui| {
-        let limits = app.render_workspace.view.raytrace.budget.limits();
-        ui.label(format!("{}: {:.2} GiB", app.tr("render.cpu_budget_memory"), limits.max_job_bytes as f64 / 1_073_741_824.0));
-        ui.label(format!("{}: {}", app.tr("render.cpu_budget_triangles"), limits.max_triangles));
-        ui.label(format!("{}: {}", app.tr("render.cpu_budget_bodies"), limits.max_bodies));
-        ui.label(format!("{}: {}", app.tr("render.cpu_progressive_spp"), limits.max_samples_per_pixel));
-        ui.small(app.tr("render.cpu_budget_not_guarantee"));
-    });
+    crate::scenario::publish_rect("render:cpu-budget", response.response.rect);
+    if response.inner
+        && let Some(budget) = budgets.get(selected)
+    {
+        app.render_workspace.view.raytrace.budget = *budget;
+        app.render_workspace.view.dirty = true;
+    }
+    let limits = app.render_workspace.view.raytrace.budget.limits();
+    let note = format!(
+        "{}: {:.2} GiB · {}: {} · {}: {} · {}: {}. {}",
+        app.tr("render.cpu_budget_memory"),
+        limits.max_job_bytes as f64 / 1_073_741_824.0,
+        app.tr("render.cpu_budget_triangles"),
+        limits.max_triangles,
+        app.tr("render.cpu_budget_bodies"),
+        limits.max_bodies,
+        app.tr("render.cpu_progressive_spp"),
+        limits.max_samples_per_pixel,
+        app.tr("render.cpu_budget_not_guarantee")
+    );
+    ui_kit::text(ui, &note, ui_kit::Text::Note("render.cpu_budget_help"));
 }
-
 fn set_progressive(app: &mut SolveApp, enabled: bool) {
     let options = &mut app.render_workspace.view.raytrace;
     if enabled {
@@ -81,42 +89,43 @@ fn set_progressive(app: &mut SolveApp, enabled: bool) {
 
 pub(super) fn progressive_controls(app: &mut SolveApp, ui: &mut egui::Ui) -> bool {
     budget_controls(app, ui);
-    ui.label(app.tr("render.cpu_sampling_mode"));
-    let selected = app.render_workspace.view.raytrace.progressive.is_some();
-    let label = app.tr(if selected { "render.cpu_progressive" } else { "render.cpu_fixed" }).to_string();
-    let response = ui_kit::dropdown_menu(ui, "render_cpu_sampling", &label, |ui| {
-        for (enabled, key, handle) in [(false, "render.cpu_fixed", "render:cpu-fixed"), (true, "render.cpu_progressive", "render:cpu-progressive")] {
-            let response = ui_kit::list_picker(ui, handle, app.tr(key), selected == enabled);
-            crate::scenario::publish_handle(handle, response.rect.center());
-            if response.clicked() {
-                set_progressive(app, enabled);
-                ui.close();
-            }
-        }
+    let mut selected = usize::from(app.render_workspace.view.raytrace.progressive.is_some());
+    let labels = [app.tr("render.children.single_image").to_string(), app.tr("render.cpu_progressive").to_string()];
+    let response = ui.scope(|ui| {
+        ui_kit::row(ui, app.tr("render.children.sampling"), |ui| {
+            ui_kit::segmented(
+                ui,
+                &mut selected,
+                &labels.iter().map(String::as_str).collect::<Vec<_>>(),
+                ui_kit::Segments { compact: true, targets: &["render:cpu-fixed", "render:cpu-progressive"], ..Default::default() },
+            )
+        })
     });
-    crate::scenario::publish_handle("render:cpu-sampling", response.rect.center());
-    let spp = app.tr("render.cpu_progressive_spp").to_string();
-    let seed = app.tr("render.cpu_progressive_seed").to_string();
-    if let Some(options) = &mut app.render_workspace.view.raytrace.progressive {
-        ui.label(spp);
-        let response = ui_kit::number_field(ui, &mut options.samples_per_pixel, 1..=4096, 1.0, "");
-        app.render_workspace.view.dirty |= response.changed();
-        crate::scenario::publish_handle("render:cpu-spp", response.rect.center());
-        ui.label(seed);
-        let response = ui_kit::number_field(ui, &mut options.seed, 0..=u32::MAX, 1.0, "");
-        app.render_workspace.view.dirty |= response.changed();
-        crate::scenario::publish_handle("render:cpu-seed", response.rect.center());
-        ui.small(app.tr("render.cpu_progressive_help"));
-        if app.render_workspace.view.raytrace.budget == CpuBudget::Compact {
-            ui.small(app.tr("render.cpu_progressive_limits"));
-        } else {
-            ui.small(app.tr("render.cpu_budget_not_guarantee"));
-        }
-        return true;
+    crate::scenario::publish_target("render:cpu-sampling", response.response.rect);
+    if response.inner {
+        set_progressive(app, selected == 1);
     }
-    false
+    let enabled = app.render_workspace.view.raytrace.progressive.is_some();
+    let mut options = app.render_workspace.view.raytrace.progressive.unwrap_or_default();
+    if !enabled {
+        ui_kit::text(ui, app.tr("render.children.progressive_reason"), ui_kit::Text::Note("render.children.progressive_reason"));
+    }
+    ui.add_enabled_ui(enabled, |ui| {
+        let response =
+            ui_kit::row(ui, app.tr("render.cpu_progressive_spp"), |ui| ui_kit::number_field(ui, &mut options.samples_per_pixel, 1..=4096, 1.0, ""));
+        app.render_workspace.view.dirty |= response.changed();
+        crate::scenario::publish_target("render:cpu-spp", response.rect);
+        let response =
+            ui_kit::row(ui, app.tr("render.cpu_progressive_seed"), |ui| ui_kit::number_field(ui, &mut options.seed, 0..=u32::MAX, 1.0, ""));
+        app.render_workspace.view.dirty |= response.changed();
+        crate::scenario::publish_target("render:cpu-seed", response.rect);
+    });
+    if enabled {
+        app.render_workspace.view.raytrace.progressive = Some(options);
+    }
+    ui_kit::text(ui, app.tr("render.cpu_progressive_help"), ui_kit::Text::Note("render.cpu_progressive_help"));
+    enabled
 }
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum Environment {
     #[default]
@@ -127,7 +136,9 @@ pub(super) enum Environment {
 
 #[derive(Clone, Debug)]
 pub(super) struct View {
+    #[cfg(test)]
     pub selected_body: Option<String>,
+    #[cfg(test)]
     pub body_filter: String,
     pub environment: Environment,
     pub hdr: hdr::Input,
@@ -164,7 +175,9 @@ pub(super) struct Checked {
 impl Default for View {
     fn default() -> Self {
         Self {
+            #[cfg(test)]
             selected_body: None,
+            #[cfg(test)]
             body_filter: String::new(),
             environment: Environment::None,
             hdr: hdr::Input::default(),
@@ -288,7 +301,7 @@ pub(super) fn params(app: &SolveApp, params: &mut Value) -> Result<(), String> {
     let view = &app.render_workspace.view.cpu;
     let mut options = base.clone();
     if options.area_samples.is_some_and(|n| !matches!(n, 1 | 4 | 16 | 64)) {
-        return Err("area_samples must be 1, 4, 16 or 64".into());
+        return Err(crate::i18n::tr("render.error_area_samples").into());
     }
     if options.area_lights.as_ref().is_none_or(Vec::is_empty) {
         options.area_samples = None;
@@ -322,6 +335,7 @@ pub(super) fn params(app: &SolveApp, params: &mut Value) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     for (id, key, section) in [
         ("render_cpu_reflections", "render.cpu_reflections", 0),
@@ -338,6 +352,7 @@ pub(super) fn controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     ui.small(app.tr("render.cpu_runtime_help"));
 }
 
+#[cfg(test)]
 pub(super) fn reflection_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     ui.small(app.tr("render.cpu_reflection_help"));
     let entries = app.render_workspace.view.raytrace.reflections.as_ref().map(|r| r.bodies.clone()).unwrap_or_default();
@@ -413,18 +428,22 @@ pub(super) fn reflection_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     {
         app.set_status(error, true);
     }
+    reflection_sampling_controls(app, ui);
+}
+
+/// Existing global reflection budget, shared during the Sampling-editor migration.
+pub(super) fn reflection_sampling_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     let depth = app.tr("render.cpu_reflection_depth").to_string();
     let samples = app.tr("render.cpu_reflection_samples").to_string();
     if let Some(reflections) = &mut app.render_workspace.view.raytrace.reflections {
-        ui.label(depth);
-        ui_kit::number_field(ui, &mut reflections.max_bounces, 1..=8, 1.0, "");
-        ui.label(samples);
-        ui_kit::number_field(ui, &mut reflections.samples, 1..=64, 1.0, "");
+        ui_kit::row(ui, &depth, |ui| ui_kit::number_field(ui, &mut reflections.max_bounces, 1..=8, 1.0, ""));
+        ui_kit::row(ui, &samples, |ui| ui_kit::number_field(ui, &mut reflections.samples, 1..=64, 1.0, ""));
     } else {
         ui.small(app.tr("render.cpu_reflection_empty"));
     }
 }
 
+#[cfg(test)]
 pub(super) fn environment_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     let selected = app.render_workspace.view.cpu.environment;
     let key = match selected {
@@ -547,7 +566,7 @@ pub(super) fn light_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
                 ui.label(minimum);
                 ui_kit::number_field(ui, &mut light.minimum_distance_mm, 0.001..=1e6, 0.01, " mm");
                 let mut spot = light.cone.is_some();
-                if ui_kit::checkbox(ui, "Spot cone", &mut spot).changed() {
+                if ui_kit::checkbox(ui, crate::i18n::tr("render.spot_cone"), &mut spot).changed() {
                     light.cone = spot.then_some(solidcraft_engine::render::job::SpotConeOptions {
                         emitted_axis: [0.0, 0.0, -1.0],
                         inner_half_angle_radians: 0.2,
@@ -555,10 +574,11 @@ pub(super) fn light_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
                     });
                 }
                 if let Some(cone) = &mut light.cone {
-                    vector(ui, "Emitted axis", &mut cone.emitted_axis, -1e8..=1e8, 0.01, "");
-                    for (label, value) in
-                        [("Inner half angle", &mut cone.inner_half_angle_radians), ("Outer half angle", &mut cone.outer_half_angle_radians)]
-                    {
+                    vector(ui, crate::i18n::tr("render.emitted_axis"), &mut cone.emitted_axis, -1e8..=1e8, 0.01, "");
+                    for (label, value) in [
+                        (crate::i18n::tr("render.inner_half_angle"), &mut cone.inner_half_angle_radians),
+                        (crate::i18n::tr("render.outer_half_angle"), &mut cone.outer_half_angle_radians),
+                    ] {
                         ui.label(label);
                         let mut degrees = value.to_degrees();
                         if ui_kit::number_field(ui, &mut degrees, 0.0..=90.0, 0.1, " deg").changed() {
