@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+meshlib = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 
