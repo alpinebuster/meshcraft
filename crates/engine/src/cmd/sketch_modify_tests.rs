@@ -1150,6 +1150,53 @@ fn centre_circle_through_a_point_keeps_it_on_the_circle() {
     assert!(!sketch(&s).constraints.iter().any(|k| matches!(k.kind, ConstraintKind::PointOnCurve { c, .. } if c == ci)));
 }
 
+/// #9858: a 3-point circle drawn on snapped clicks keeps them. Drawn through a line's start,
+/// its midpoint and another line's end, the circle stays on those points when the line is
+/// dimensioned.
+#[test]
+fn three_point_circle_keeps_snapped_points() {
+    let mut s = new_sketch();
+    let l = ids(&run(&mut s, "sketch.line", json!({"points": [[0, 0], [40, 0]]}))["curves"])[0].clone();
+    let v = ids(&run(&mut s, "sketch.line", json!({"points": [[20, 5], [20, 30]]}))["curves"])[0].clone();
+    let r = run(&mut s, "sketch.circle.three_point", json!({"p0": format!("{l}.start"), "p1": format!("mid:{l}"), "p2": format!("{v}.end")}));
+    let c = ids(&r["curves"])[0].clone();
+    assert_eq!(ids(&r["constraints"]).len(), 3, "{r}");
+    let sk = sketch(&s);
+    let ci = sk.curve_index(&c).unwrap();
+    let on_circle =
+        |sk: &solidcraft_sketch::Sketch, p: usize, c: usize| sk.constraints.iter().any(|k| k.kind == ConstraintKind::PointOnCurve { p, c });
+    let (start, tip) = (sk.resolve_point(&format!("{l}.start")).unwrap(), sk.resolve_point(&format!("{v}.end")).unwrap());
+    // The midpoint snap holds its point at the line's midpoint, and the circle keeps it too.
+    let mid = sk
+        .constraints
+        .iter()
+        .find_map(|k| match k.kind {
+            ConstraintKind::Midpoint { p, .. } => Some(p),
+            _ => None,
+        })
+        .expect("midpoint snap point");
+    for p in [start, mid, tip] {
+        assert!(on_circle(&sk, p, ci), "{:?} is not on the circle: {:?}", sk.points[p].id, sk.constraints);
+    }
+    // Seeded as the circumcircle of the three clicks.
+    let (o, rad) = (sk.center(ci).unwrap(), sk.radius(ci).unwrap());
+    for p in [start, mid, tip] {
+        assert!(close(o.dist(sk.points[p].pos), rad), "the circle does not pass its click: {o:?} {rad}");
+    }
+    // Dimensioning the line: the circle stays on the start, midpoint and end.
+    run(&mut s, "sketch.dimension", json!({"entities": [l], "value": 60}));
+    let sk = sketch(&s);
+    let (o, rad) = (sk.center(ci).unwrap(), sk.radius(ci).unwrap());
+    for p in [start, mid, tip] {
+        assert!(close(o.dist(sk.points[p].pos), rad), "the circle left a snapped point: {:?}", sk.points);
+    }
+    // Plain positions: nothing to keep.
+    let r = run(&mut s, "sketch.circle.three_point", json!({"p0": [100, 0], "p1": [110, 0], "p2": [105, 8]}));
+    let ci = sketch(&s).curve_index(&ids(&r["curves"])[0]).unwrap();
+    assert!(ids(&r["constraints"]).is_empty());
+    assert!(!sketch(&s).constraints.iter().any(|k| matches!(k.kind, ConstraintKind::PointOnCurve { c, .. } if c == ci)));
+}
+
 #[test]
 fn ellipse_splines_conic() {
     let pi = std::f64::consts::PI;
@@ -3455,4 +3502,46 @@ fn corner_tools_refuse_all_spatial_curves_with_an_unsupported_message() {
             }
         }
     }
+}
+
+/// `sketch.arc.tangent` ends on an existing point when `end` names it, so a chain can close, and
+/// makes a new point for coordinates as before (#9489). The preview is the arc the command draws.
+#[test]
+fn a_tangent_arc_can_end_on_an_existing_point() {
+    let mut s = new_sketch();
+    let far = ids(&run(&mut s, "sketch.line", json!({"points": [[20, 20], [40, 20]], "connect": false, "infer": false}))["curves"])[0].clone();
+    let line = ids(&run(&mut s, "sketch.line", json!({"points": [[0, 0], [10, 0]], "connect": false, "infer": false}))["curves"])[0].clone();
+    let start = format!("{line}.end");
+    let target = format!("{far}.start");
+    let sk = sketch(&s);
+    let preview = crate::cmd::tangent_arc_preview(&sk, &line, &start, Vec2::new(20.0, 20.0)).expect("an arc");
+    assert_eq!(preview.curves.len(), 1);
+    assert!(preview.center(0).unwrap().dist(Vec2::new(10.0, 12.5)) < 1e-9, "{:?}", preview.center(0));
+    assert!(crate::cmd::tangent_arc_preview(&sk, &line, &start, Vec2::new(30.0, 0.0)).is_none(), "straight ahead there is no arc");
+
+    let points = sk.points.len();
+    let r = run(&mut s, "sketch.arc.tangent", json!({"start": start, "curve": line, "end": target}));
+    let arc = ids(&r["curves"])[0].clone();
+    let sk = sketch(&s);
+    assert_eq!(sk.resolve_point(&format!("{arc}.end")), sk.resolve_point(&format!("{far}.start")), "the arc ends on that point");
+    assert_eq!(sk.resolve_point(&format!("{arc}.start")), sk.resolve_point(&format!("{line}.end")));
+    assert_eq!(sk.points.len(), points + 1, "only the arc's centre is new");
+    let ai = sk.curve_index(&arc).unwrap();
+    assert!(sk.center(ai).unwrap().dist(Vec2::new(10.0, 12.5)) < 1e-6, "{:?}", sk.center(ai));
+    assert!(close(sk.radius(ai).unwrap(), 12.5));
+
+    // Clockwise: the arc is stored the other way round, and its end is still the named point.
+    let down = ids(&run(&mut s, "sketch.line", json!({"points": [[0, -50], [10, -50]], "connect": false, "infer": false}))["curves"])[0].clone();
+    let mark = ids(&run(&mut s, "sketch.line", json!({"points": [[20, -70], [40, -70]], "connect": false, "infer": false}))["curves"])[0].clone();
+    let r = run(&mut s, "sketch.arc.tangent", json!({"start": format!("{down}.end"), "curve": down, "end": format!("{mark}.start")}));
+    let arc = ids(&r["curves"])[0].clone();
+    let sk = sketch(&s);
+    assert_eq!(sk.resolve_point(&format!("{arc}.end")), sk.resolve_point(&format!("{mark}.start")));
+    assert_eq!(sk.resolve_point(&format!("{arc}.start")), sk.resolve_point(&format!("{down}.end")));
+
+    // A name that is no point, and the arc's own start, are refused and change nothing.
+    let before = s.doc.to_json();
+    assert!(s.execute("sketch.arc.tangent", &json!({"start": format!("{down}.end"), "curve": down, "end": "nowhere"})).is_err());
+    assert!(s.execute("sketch.arc.tangent", &json!({"start": format!("{down}.end"), "curve": down, "end": format!("{down}.end")})).is_err());
+    assert_eq!(s.doc.to_json(), before);
 }

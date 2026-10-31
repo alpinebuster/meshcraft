@@ -216,6 +216,7 @@ pub mod recovery_ui;
 pub mod ref_images;
 mod render_ui;
 pub mod render_workspace;
+pub mod resume_ui;
 #[cfg(test)]
 mod revolve_edit_tests;
 #[cfg(test)]
@@ -255,6 +256,7 @@ mod sketch_edit_tests;
 mod sketch_families;
 #[cfg(test)]
 mod sketch_guidance_ui_tests;
+pub(crate) mod sketch_line_arc;
 pub mod sketch_modify_ui;
 #[cfg(test)]
 mod sketch_modify_ui_tests;
@@ -505,6 +507,9 @@ pub struct SolveApp {
     /// The views around opening the open sketch. Leaving it goes back to the earlier one as the
     /// "When a sketch ends" preference says (#7038).
     pub pre_sketch_cam: Option<PreSketchView>,
+    /// The view from before Extrude turned it to isometric (#9176); the view goes back to it when
+    /// the dialog closes, as the "and back when it closes" preference says.
+    pub pre_extrude_cam: Option<Camera>,
     /// The component active before Edit Sketch activated the one the sketch is in (#8127);
     /// leaving the sketch makes it active again.
     pub pre_sketch_component: Option<PreSketchComponent>,
@@ -762,6 +767,7 @@ impl SolveApp {
             now: 0.0,
             pre_sketch_marker: None,
             pre_sketch_cam: None,
+            pre_extrude_cam: None,
             pre_sketch_component: None,
             services,
             file_picker: None,
@@ -1527,6 +1533,16 @@ impl SolveApp {
             self.repeat_last();
             return;
         }
+        // Modify ▸ Delete deletes what is selected, as the Delete key does (#9079); with nothing
+        // selected it says what to pick instead of running with no features.
+        if id == "timeline.delete" {
+            if delete::nothing_to_delete(self) && self.tree.picked_timeline_groups.is_empty() {
+                self.set_status(self.tr("ui.delete_select_first"), false);
+            } else if !timeline_left::delete_selected_folders(self) {
+                delete::delete_selection(self);
+            }
+            return;
+        }
         // Front … Isometric (Ctrl+1…7 by default) turn the view as the view cube's faces do. The
         // flat pattern is a 2D page: it has no other side to turn to.
         if solidcraft_engine::standard_view(id).is_some() {
@@ -1788,6 +1804,10 @@ impl SolveApp {
             design_properties::open_selected(self);
             return;
         }
+        if id == "sketch.edit" {
+            self.start_sketch_edit(opener);
+            return;
+        }
         if id == "sketch.finish" {
             self.finish_sketch();
             return;
@@ -1938,7 +1958,11 @@ impl SolveApp {
             if d.wants_picks() && !self.session.selection.is_empty() {
                 let _ = self.session.execute("select.clear", &json!({}));
             }
+            let extrude = matches!(d.kind, dialogs::Kind::Extrude { .. });
             self.dialog = Some(d);
+            if extrude {
+                self.turn_for_extrude();
+            }
             return;
         }
         // Undo and redo can recompute much of the history: off the window thread when slow.
@@ -1957,6 +1981,37 @@ impl SolveApp {
     /// Does starting `id` open a tool or a dialog?
     fn interactive(&self, id: &str) -> bool {
         tools::Tool::for_command(id).is_some() || dialogs::Dialog::for_command(self, id).is_some()
+    }
+
+    /// The ribbon has no sketch argument: use one unambiguous sketch pick, otherwise ask.
+    fn start_sketch_edit(&mut self, opener: Option<egui::Rect>) {
+        use solidcraft_engine::{Sel, doc::FeatureKind};
+        let mut sketches: Vec<u64> = self
+            .session
+            .selection
+            .iter()
+            .filter_map(|s| match s {
+                Sel::Feature { id } => Some(*id),
+                Sel::Profile { sketch, .. } | Sel::ExternalSketchCurve { sketch, .. } | Sel::ExternalSketchPoint { sketch, .. } => Some(*sketch),
+                Sel::SketchCurve { sketch, .. } => *sketch,
+                _ => None,
+            })
+            .filter(|id| self.session.doc.feature(*id).is_some_and(|f| matches!(f.kind, FeatureKind::Sketch { .. })))
+            .collect();
+        sketches.sort_unstable();
+        sketches.dedup();
+        let sketch = match sketches.as_slice() {
+            [id] => Some(*id),
+            [] => self.session.active_sketch,
+            _ => None,
+        };
+        if let Some(id) = sketch {
+            self.edit_feature(id);
+        } else {
+            dialogs::cancel(self);
+            self.tool = None;
+            self.open_choice_menu(opener, context_menu::Target::EditSketch);
+        }
     }
 
     /// Edit a feature: sketches open in sketch mode; other features roll the
@@ -2074,6 +2129,30 @@ impl SolveApp {
         }
         self.pre_sketch_cam = self.session.active_sketch.map(|sketch| PreSketchView { sketch, before, facing: self.settled_cam() });
         turn
+    }
+
+    /// Extrude opened: turn the view to isometric when Preferences say so, and remember the view
+    /// from before for when the dialog closes (#9176).
+    fn turn_for_extrude(&mut self) {
+        if !self.preferences.extrude_view_isometric {
+            return;
+        }
+        let before = self.settled_cam();
+        let mut to = before;
+        to.set_view(StandardView::Iso);
+        self.pre_extrude_cam = self.preferences.extrude_view_return.then_some(before);
+        self.animate_to(to);
+    }
+
+    /// Once Extrude has closed, however it closed, the view goes back to where it was before
+    /// Extrude turned it (#9176). Going back keeps the projection, as at the end of a sketch.
+    fn return_from_extrude_view(&mut self) {
+        if self.dialog.as_ref().is_some_and(|d| matches!(d.kind, dialogs::Kind::Extrude { .. })) {
+            return;
+        }
+        if let Some(before) = self.pre_extrude_cam.take() {
+            self.animate_to(Camera { fov: self.settled_cam().fov, ..before });
+        }
     }
 
     /// Where the camera is going: the end of the running camera animation, else where it is.
@@ -2535,6 +2614,12 @@ impl SolveApp {
 
     /// Per-frame logic before layout.
     pub fn logic(&mut self, ctx: &egui::Context) {
+        // Sleep/wake often skips frames without a device-lost signal; refresh egui GPU textures
+        // when the frame clock jumps so the chrome is not stuck blank (#8749).
+        let frame_time = ctx.input(|i| i.time);
+        if resume_ui::is_long_pause(self.now, frame_time) {
+            resume_ui::after_long_pause(ctx);
+        }
         frame_watch::begin(self);
         gpu::tick_tessellation(self);
         file_picker::tick(self, ctx);
@@ -2586,6 +2671,7 @@ impl SolveApp {
         self.poll_control_jobs(ctx);
         self.drain_control(ctx);
         self.follow_view_request(true);
+        self.return_from_extrude_view();
         agent_cursor::step(self, ctx);
         browser::eye_drag_frame(self, ctx);
         if !self.synthetic.is_empty() {
@@ -2784,7 +2870,7 @@ impl SolveApp {
             self.shell.history = None;
         }
         // The model draws next: a dialog the toolbar closed last frame no longer shows its sketch.
-        dialogs::sync_feature_edit_sketch(self);
+        dialogs::sync_feature_edit(self);
         let full = ui.available_rect_before_wrap();
         if floating {
             let cards = toolbar::shell_cards(self, full);

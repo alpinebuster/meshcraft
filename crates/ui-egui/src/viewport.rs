@@ -673,6 +673,18 @@ fn supersampling(app: &mut SolveApp, ctx: &egui::Context, view_proj: [[f32; 4]; 
 
 /// Ambient occlusion samples per pixel this frame (#7165): the full count once the view has held
 /// still for a moment, fewer while it moves, so orbiting with AO on stays quick.
+/// The shader's sky (#7974): the world's up direction, and 1 to shade in linear light with a sky
+/// fill (Preferences › Graphics), else zero.
+pub(crate) fn sky_uniform(on: bool, up: solidcraft_engine::render::UpAxis) -> [f32; 4] {
+    if !on {
+        return [0.0; 4];
+    }
+    match up {
+        solidcraft_engine::render::UpAxis::Z => [0.0, 0.0, 1.0, 1.0],
+        solidcraft_engine::render::UpAxis::Y => [0.0, 1.0, 0.0, 1.0],
+    }
+}
+
 fn ao_samples(app: &mut SolveApp, ctx: &egui::Context, view_proj: [[f32; 4]; 4], size_px: [f32; 2]) -> u32 {
     // Without AO (off, or wireframe) the count is unused: no repaint is asked for it.
     if !app.preferences.ambient_occlusion || app.ui.visual_style == 2 || view_settled(app, ctx, view_proj, size_px) {
@@ -4322,6 +4334,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
                 let c = t.body_selected;
                 [f32::from(c.r()) / 255.0, f32::from(c.g()) / 255.0, f32::from(c.b()) / 255.0]
             },
+            sky: sky_uniform(app.preferences.dark_parts_shading, proj.cam.up),
         });
         painter.add(egui_wgpu::Callback::new_paint_callback(rect, cb));
         // The graphics card had no memory for the view's frame (#7296): say once why it looks
@@ -4407,6 +4420,21 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     let held_mods = crate::tool_modifiers::Held::from_modifiers(mods);
     let (add, allow_toggle) = crate::tool_modifiers::selection_click(held_mods, app.preferences.selection_shift_add_only);
     crate::sketch_text::set_one_letter(mods.shift);
+    // Resting on the Line tool's last point switches lines and tangent arcs (#9489): only a free
+    // pointer, nothing held or under way. Not `inside`: on that point the pointer is between the
+    // new segment's value boxes, which take it from the view (as a shape being dragged out does).
+    let free_pointer = ui.is_enabled()
+        && !primary_down
+        && !secondary_down
+        && !middle
+        && !held
+        && primary_nav.is_none()
+        && mode.is_none()
+        && mods.is_none()
+        && !app.viewport.tool_click
+        && app.viewport.draw_drag.is_none();
+    let resting = hover.filter(|p| free_pointer && rect.contains(*p) && !axes.contains(*p) && !crate::shell::covered(app, *p));
+    crate::sketch_line_arc::follow_pointer(app, ui.ctx(), &proj, resting);
     if let Some(p) = hover.filter(|_| inside) {
         if app.tool.is_some() {
             crate::tools::on_hover(app, &proj, p, mods.shift);
@@ -4690,13 +4718,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
                 let st = crate::open_meshing::shown_world(app);
                 app.session.active_sketch.and_then(|s| st.sketch(s)).and_then(|ss| {
                     let sk = &ss.sketch;
-                    let (mut own, mut exclude) = crate::drag_snap::moving_points(sk, &id);
-                    for (o, x) in with.iter().map(|w| crate::drag_snap::moving_points(sk, w)) {
-                        own.extend(o);
-                        exclude.extend(x);
-                    }
-                    own.sort_unstable();
-                    own.dedup();
+                    let (own, exclude) = crate::drag_snap::moving_points(sk, std::iter::once(id.as_str()).chain(with.iter().map(String::as_str)));
                     if own.iter().any(|&p| sk.point_locked(p)) {
                         return crate::drag_snap::find(sk, &[], &[], 0.0);
                     }
@@ -4897,6 +4919,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     }
     crate::canvas::show(app, ui, &painter, &proj);
     crate::sketch_tools::show(app, ui, &painter, &proj);
+    crate::sketch_line_arc::paint_mode(app, ui, &painter, &proj);
     crate::design_properties::overlay(app, &painter, &proj);
     crate::sketch_dims::show(app, ui, &proj);
     crate::select_other::show(app, ui.ctx());
@@ -5958,15 +5981,16 @@ fn grid_colour(c: [u8; 4], alpha: f32) -> [u8; 4] {
 
 /// Where the ground grid is centred: where the view's axis (`back`, through the camera's target
 /// `tf`) meets the plane through the origin with normal `n`, so the middle of the view has grid
-/// (#3087). At a grazing slant that point runs far off, and the ground in front of the camera
-/// would have none: it stays within `ext` (the grid's half-size) of the point under the target.
+/// (#3087). At a grazing slant, return smoothly toward the point under the target: the actual
+/// intersection runs beyond the visible grid and jumps to the other side at the horizon.
 fn grid_centre(tf: Vec3, back: Vec3, n: Vec3, ext: f64) -> Vec3 {
-    let under = tf - n * tf.dot(n);
+    let height = tf.dot(n);
+    let under = tf - n * height;
     let slant = back.dot(n);
-    if slant.abs() <= 1e-3 {
-        return under;
-    }
-    let along = tf - back * (tf.dot(n) / slant) - under;
+    // Use the same minimum slant as grid_ext and GridFade. Above it, this is the view-axis
+    // intersection; below it, the offset tends continuously to zero instead of infinity.
+    let reach_slant = slant.abs().max(0.25);
+    let along = (back - n * slant) * (-height * slant / (reach_slant * reach_slant));
     let len = along.len();
     if len > ext && len > 0.0 { under + along * (ext / len) } else { under + along }
 }
@@ -7946,6 +7970,7 @@ mod tests {
                     eye: [e[0], e[1], e[2], if proj.cam.fov > 0.0 { 1.0 } else { 0.0 }],
                     ao_radius: 0.0,
                     ao_samples: solidcraft_gpu::view::AO_SAMPLES,
+                    sky: [0.0; 4],
                     ssaa: 1.0,
                     hover_tint: [0.0; 3],
                     selection_tint: [0.0; 3],
@@ -10203,6 +10228,57 @@ mod tests {
         assert_eq!(h.app.cam, stopped, "noise must leave the camera still");
     }
 
+    /// A two-finger pan, a pinch and the wheel over a value box anchored to the model (Extrude's
+    /// distance) move the view as they do beside it (#10061): the box scrolls nothing, and a
+    /// gesture crossing it stopped. The box keeps its value. Dialogs keep theirs (below).
+    #[test]
+    fn trackpad_gestures_and_the_wheel_over_a_value_box_move_the_view() {
+        let mut h = crate::scenario::Harness::new();
+        h.app.run("sketch.create", json!({"plane": "XY"})).unwrap();
+        h.app.run("sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [40, 30]})).unwrap();
+        h.app.run("sketch.finish", json!({})).unwrap();
+        let sketch = h.app.session.doc.features[0].id;
+        h.app.session.selection = vec![Sel::Profile { sketch, index: 0 }];
+        h.step(&json!({"start": "solid.extrude"})).unwrap();
+        h.frames(6);
+        let over =
+            |h: &crate::scenario::Harness| h.ctx.read_response(egui::Id::new("sc_canvas_value")).expect("Extrude's distance box").rect.center();
+        let distance = |h: &crate::scenario::Harness| format!("{:?}", h.app.dialog.as_ref().map(|d| &d.kind));
+        let typed = distance(&h);
+        let at = over(&h);
+        h.call("ui.move", json!({"x": at.x, "y": at.y}));
+        h.frames(2);
+        assert!(h.ctx.layer_id_at(at).is_some_and(crate::ui_kit::container::is_canvas), "the pointer is on the box");
+        let gesture =
+            |phase| egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(30.0, -20.0), modifiers: egui::Modifiers::NONE, phase };
+        let before = h.app.cam;
+        h.app.synthetic.push(gesture(egui::TouchPhase::Start));
+        h.frame();
+        h.app.synthetic.push(gesture(egui::TouchPhase::Move));
+        h.frame();
+        assert_ne!(h.app.cam.target, before.target, "a two-finger pan over the box pans");
+        assert_eq!(h.app.cam.half_height(), before.half_height());
+        h.app.synthetic.push(gesture(egui::TouchPhase::End));
+        h.frames(30);
+        let at = over(&h);
+        h.call("ui.move", json!({"x": at.x, "y": at.y}));
+        h.frames(2);
+        let panned = h.app.cam;
+        h.app.synthetic.push(egui::Event::Zoom(1.2));
+        h.frame();
+        assert!(h.app.cam.half_height() < panned.half_height(), "a pinch over the box zooms");
+        let at = over(&h);
+        h.call("ui.move", json!({"x": at.x, "y": at.y}));
+        h.frames(2);
+        let pinched = h.app.cam;
+        h.app.preferences.smooth_wheel_zoom = false;
+        h.call("ui.scroll", json!({"x": at.x, "y": at.y, "delta": 120.0}));
+        h.frames(2);
+        assert_ne!(h.app.cam.half_height(), pinched.half_height(), "the wheel over the box zooms");
+        assert_eq!(distance(&h), typed, "the box kept its value");
+        assert!(h.app.dialog.is_some());
+    }
+
     #[test]
     fn trackpad_gestures_over_dialogs_do_not_move_the_view() {
         let ctx = crate::fonts::test_context();
@@ -11467,6 +11543,49 @@ mod grid_plane_tests {
         // Edge-on: under the target.
         let c = grid_centre(tf, Vec3::Y, n, 120.0);
         assert!(c.len() < 1e-9, "{c:?}");
+    }
+
+    #[test]
+    fn ground_grid_centre_is_continuous_across_the_horizon() {
+        for normal in [Vec3::Y, Vec3::Z] {
+            for height in [-13.0, 0.0, 13.0] {
+                let target = Vec3::X * 2.0 + normal * height;
+                for extent in [120.0, 600.0] {
+                    let centre = |step: i32| {
+                        let pitch = f64::from(step) * 0.0001;
+                        grid_centre(target, Vec3::X * pitch.cos() + normal * pitch.sin(), normal, extent)
+                    };
+                    for step in -20..20 {
+                        let (a, b) = (centre(step), centre(step + 1));
+                        assert!(a.dot(normal).abs() < 1e-9 && b.dot(normal).abs() < 1e-9);
+                        assert!(
+                            a.dist(b) < 0.1,
+                            "a tiny orbit must not move the grid away: height {height}, extent {extent}, step {step}: {a:?} -> {b:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn grazing_ground_grid_keeps_the_point_under_the_target_visible() {
+        let half_height = 124.55908448439891 * 0.4;
+        let major = grid_step(half_height).1;
+        for normal in [Vec3::Y, Vec3::Z] {
+            for height in [-12.966269622652957, 12.966269622652957] {
+                let target = Vec3::X * 2.1333385556362745 + normal * height;
+                let under = target - normal * height;
+                for pitch in [-0.125_f64, -0.08, -0.02, 0.0, 0.02, 0.08, 0.125] {
+                    let back = Vec3::X * pitch.cos() + normal * pitch.sin();
+                    let slant = back.dot(normal);
+                    let ext = grid_ext(half_height, major, slant);
+                    let centre = grid_centre(target, back, normal, ext);
+                    let fade = GridFade::new(half_height, slant, ext, f64::INFINITY);
+                    assert_eq!(fade.alpha(centre.dist(under)), 1.0, "the grid must not recede from the model: height {height}, pitch {pitch}");
+                }
+            }
+        }
     }
 
     /// #3087: zoomed in on a target below the ground (an orbit left it there), seen at a slant,

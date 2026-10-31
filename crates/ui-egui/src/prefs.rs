@@ -976,6 +976,9 @@ preference_settings! {
     graphics_adapter: String = String::new(), PAGE_GRAPHICS;
     /// Soft contact shading in the GPU viewport; optional and applied immediately.
     ambient_occlusion: bool = false, PAGE_GRAPHICS;
+    /// Shade the viewport in linear light with a sky fill, so dark parts keep their shape
+    /// (#7974). Off by default: the viewport shades as it always has.
+    dark_parts_shading: bool = false, PAGE_GRAPHICS => check_id("prefs.dark_parts_shading");
     /// Optional schematic markings on threaded cylindrical walls; off for new and older preferences.
     cosmetic_threads: bool = false, PAGE_GRAPHICS;
     /// The grid turns to the upright origin plane facing a side view (#1470). Off by default: the
@@ -1211,6 +1214,12 @@ preference_settings! {
     /// Extrude: with a profile picked, a face, vertex or parallel plane picked off its plane
     /// switches the extent to To Object (off: picks only add profiles, as before).
     extrude_auto_to_object: bool = false, PAGE_DESIGN => check("Extrude to a picked target", "In Extrude, with a profile picked, picking a face, vertex or parallel plane off its plane switches the extent to To Object");
+    /// Extrude turns the view to isometric each time it opens, so the depth can be seen (#9176).
+    /// Off (the default): the view stays as it is.
+    extrude_view_isometric: bool = false, PAGE_DESIGN => check_id("prefs.extrude_view_isometric");
+    /// With `extrude_view_isometric`: when Extrude closes (OK or Cancel) the view goes back to
+    /// where it was before it turned (#9176). Off (the default): it stays isometric.
+    extrude_view_return: bool = false, PAGE_DESIGN => check_id("prefs.extrude_view_return");
     /// Feature windows choose Join, New Body or Cut from what their material touches (`op_auto`,
     /// #6901). Off: they keep the operation they open with (Extrude its own Join or Cut), as before.
     auto_operation: bool = true, PAGE_DESIGN => check_id("prefs.auto_operation");
@@ -1373,6 +1382,10 @@ preference_settings! {
     /// release and end there (#7247); clicks still draw a chain. Off (the default): a drag is a
     /// click that moved on the way, placing a point where it is let go (#2448).
     line_drag_draws_one: bool = false, PAGE_SKETCH => check_id("prefs.line_drag_draws_one");
+    /// In the Line tool, leaving the chain's last point and resting back on it switches to a
+    /// tangent arc, and the same again back to lines (#9489). Off (the default): resting there
+    /// does nothing, and tangent arcs are the Arc tool's.
+    line_hover_tangent_arc: bool = false, PAGE_SKETCH => check_id("prefs.line_hover_tangent_arc");
     /// Include hidden geometry and a small pointer neighbourhood in Select Other.
     select_other_hidden: bool = true, PAGE_SKETCH => check_id("prefs.select_other_hidden");
     /// When true: Shift+click adds without removing; Primary toggles.
@@ -5498,6 +5511,7 @@ mod tests {
             ("sketch_tracking_points", json!(false), PAGE_SKETCH),
             ("sketch_align_points", json!(true), PAGE_SKETCH),
             ("sketch_recent_snap", json!(true), PAGE_SKETCH),
+            ("line_hover_tangent_arc", json!(true), PAGE_SKETCH),
             ("msaa", json!(8), PAGE_GRAPHICS),
             ("single_surface_analysis", json!(false), PAGE_GRAPHICS),
         ];
@@ -8664,6 +8678,31 @@ mod ambient_occlusion_tests {
         assert_eq!(h.app.cam, camera);
         assert_eq!(h.app.session.doc.to_json(), design);
         assert!(h.app.session.undo.is_empty());
+    }
+
+    /// #7974: shading dark parts in linear light with a sky fill is off for older and new
+    /// preferences, turned on from the Graphics page, kept, and sent to the shader with the world's
+    /// up direction; Restore Defaults turns it off again.
+    #[test]
+    fn dark_parts_shading_is_optional_persistent_and_follows_the_up_axis() {
+        use solidcraft_engine::render::UpAxis;
+        let old: Prefs = serde_json::from_value(json!({"msaa": 4})).unwrap();
+        assert!(!old.dark_parts_shading && !Prefs::default().dark_parts_shading);
+        assert_eq!(crate::viewport::sky_uniform(false, UpAxis::Z), [0.0; 4], "off: shaded as before");
+        assert_eq!(crate::viewport::sky_uniform(true, UpAxis::Z), [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(crate::viewport::sky_uniform(true, UpAxis::Y), [0.0, 1.0, 0.0, 1.0]);
+        let mut h = crate::scenario::Harness::new();
+        h.call("ui.prefs", json!({"open":"Graphics"}));
+        super::reveal_preference(&mut h, "prefs:dark_parts_shading");
+        let checkbox = crate::scenario::handle_at("prefs:dark_parts_shading").unwrap();
+        h.call("ui.click", json!({"x":checkbox.x,"y":checkbox.y}));
+        assert!(h.app.preferences.dark_parts_shading);
+        h.call("ui.prefs", json!({"button":"apply"}));
+        let mut restored = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
+        restored.load_prefs(&h.app.prefs());
+        assert!(restored.preferences.dark_parts_shading);
+        h.call("ui.prefs", json!({"button":"defaults"}));
+        assert!(!h.app.preferences.dark_parts_shading);
     }
 }
 

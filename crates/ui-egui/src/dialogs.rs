@@ -274,6 +274,8 @@ crate::dialog_descriptor::dialog_descriptors! {
             Align {
                 flip: bool,
                 components: bool,
+                /// Point-to-point: which of the world X, Y and Z axes take the offset.
+                axes: [bool; 3],
             },
             /// Remove bodies from here on in the timeline.
             Remove,
@@ -878,7 +880,7 @@ impl Dialog {
             "solid.align" => {
                 let components = s.selection.iter().any(|x| matches!(x, Sel::Occurrence { .. }));
                 Dialog::new(
-                    Kind::Align { flip: false, components },
+                    Kind::Align { flip: false, components, axes: [true; 3] },
                     vec![
                         SelInput::new(if components { "Components" } else { "Bodies" }, BODIES, true),
                         SelInput::new("From", FACES | EDGES | selection::VERTICES | PLANES | selection::ORIGIN, false),
@@ -2642,6 +2644,14 @@ fn stored_revolve_axis(kind: &Kind) -> Option<&Value> {
     }
 }
 
+/// Give the keyboard back from whatever text editor holds it, so the pick field clicked into
+/// becomes the one field that looks active (#10066).
+fn surrender_keyboard_focus(ui: &egui::Ui) {
+    if let Some(id) = ui.ctx().memory(|memory| memory.focused()) {
+        ui.ctx().memory_mut(|memory| memory.surrender_focus(id));
+    }
+}
+
 pub(crate) fn input_rows_range(d: &mut Dialog, ui: &mut egui::Ui, s: &Session, names: crate::prefs::OriginPlaneNames, range: std::ops::Range<usize>) {
     // Edit Text shows its Path input among its own rows.
     if matches!(d.kind, Kind::Text(_)) {
@@ -2651,12 +2661,15 @@ pub(crate) fn input_rows_range(d: &mut Dialog, ui: &mut egui::Ui, s: &Session, n
     let mut clear: Option<usize> = None;
     let mut activate: Option<usize> = None;
     let mut remove = None;
+    // Only one field may look active at a time (#10066): while a text editor holds the keyboard,
+    // no pick field draws its accent ring, and clicking a pick field takes the keyboard back.
+    let text_focus = crate::ui_kit::editor_has_focus(ui.ctx());
     let shell_count = d.shell_faces(s).map(|faces| faces.len());
     for (i, inp) in d.inputs.iter().enumerate().skip(range.start).take(range.end.saturating_sub(range.start)) {
         let stored_reference = feature_pattern_reference_key(d, i).and_then(|key| d.extra.get(key)).filter(|_| inp.items.is_empty());
         form_row(ui, inp.label, |ui| {
             ui.horizontal(|ui| {
-                let active = i == d.active;
+                let active = i == d.active && !text_focus;
                 // A chip: "↖ Select" (outlined) while empty, "N selected" (filled) once picked.
                 let custom_axis = i == 1 && inp.items.is_empty() && stored_revolve_axis(&d.kind).is_some();
                 let filled = !inp.items.is_empty() || custom_axis || stored_reference.is_some();
@@ -2707,6 +2720,7 @@ pub(crate) fn input_rows_range(d: &mut Dialog, ui: &mut egui::Ui, s: &Session, n
                 };
                 if chip.on_hover_text(tooltip).clicked() {
                     activate = Some(i);
+                    surrender_keyboard_focus(ui);
                 }
                 if !inp.items.is_empty() || stored_reference.is_some() {
                     let rect = egui::Rect::from_center_size(
@@ -2717,6 +2731,7 @@ pub(crate) fn input_rows_range(d: &mut Dialog, ui: &mut egui::Ui, s: &Session, n
                     crate::scenario::publish_handle(&format!("dialog:clear:{}", inp.label), button.rect.center());
                     if button.clicked() {
                         clear = Some(i);
+                        surrender_keyboard_focus(ui);
                     }
                 }
             });
@@ -3027,20 +3042,33 @@ fn auto_operation(app: &SolveApp, d: &mut Dialog) {
         smart.start = start;
         smart.latch = None;
     }
+    // Showing or hiding a body changes what the extrude meets: the latch was decided among the
+    // bodies shown before (#9919).
+    let shown = solidcraft_engine::shown_scope(&app.session);
+    if let Kind::Extrude { smart, .. } = &mut d.kind
+        && smart.shown != shown
+    {
+        smart.shown = shown.clone();
+        smart.latch = None;
+    }
     // To an object, the extrude goes to it on whichever side it is: that is the side (#1633).
     if params.get("to").is_some()
         && let Some(reach) = solidcraft_engine::extrude_reach(&app.session, &params)
     {
         side = crate::smart_extrude::side(reach, 0);
     }
-    // Hidden bodies are out of its scope (#6901).
+    // Hidden bodies are out of its scope (#6901). With none shown there is nothing to join or
+    // cut: an empty `participants` would read as every body, hidden ones too (#9919).
     let mut params = params;
-    if let Some(shown) = solidcraft_engine::shown_scope(&app.session)
+    let mut nothing_shown = false;
+    if let Some(shown) = shown
         && params.get("participants").is_none()
     {
+        nothing_shown = shown.is_empty();
         params["participants"] = json!(shown);
     }
-    let Some(fresh) = solidcraft_engine::auto_operation(&app.session, &params).and_then(|op| OPS.iter().position(|o| *o == op)) else {
+    let fresh = if nothing_shown { Some("new") } else { solidcraft_engine::auto_operation(&app.session, &params) };
+    let Some(fresh) = fresh.and_then(|op| OPS.iter().position(|o| *o == op)) else {
         return;
     };
     if let Kind::Extrude { operation, smart, .. } = &mut d.kind {
@@ -3061,10 +3089,28 @@ fn picked_side(app: &SolveApp, d: &Dialog, first: &Sel) -> Option<usize> {
     Some(crate::smart_extrude::picked_direction(crate::smart_extrude::view_ray(&app.cam, at), normal, false))
 }
 
-/// Show the sketch of the Extrude, Revolve, sheet metal base or contour flange, or Hole at sketch
+/// Discard an editor whose target was removed, before its preview can draw again. Show the sketch
+/// of the Extrude, Revolve, sheet metal base or contour flange, or Hole at sketch
 /// points the open dialog edits, and only while it is open: whichever way the dialog closed (OK,
 /// Cancel, another tool, another design), the sketch returns to its own visibility.
-pub(crate) fn sync_feature_edit_sketch(app: &mut SolveApp) {
+pub(crate) fn sync_feature_edit(app: &mut SolveApp) {
+    if app.dialog.as_ref().and_then(|d| d.editing).is_some_and(|(id, _)| app.session.doc.feature(id).is_none()) {
+        // Undo or deletion already chose the current document and history. Cancel's rollback
+        // would try to restore the obsolete editing session; just discard its work instead.
+        app.dialog = None;
+        app.applying = None;
+        if let Some(state) = app.editing_state.take() {
+            // Undo can save the editor's temporary rollback in Redo (deletion saves it in
+            // Undo). Those exact snapshots belong to the complete design, with its old marker.
+            for snapshot in app.session.undo.iter_mut().chain(&mut app.session.redo) {
+                if std::sync::Arc::ptr_eq(&snapshot.doc, &state.source.doc) {
+                    snapshot.doc = state.original.doc.clone();
+                }
+            }
+        }
+        app.preview.reset();
+        app.op_check.abandon();
+    }
     app.session.feature_edit_sketch = app.dialog.as_ref().and_then(|d| d.editing).and_then(|(id, _)| match &app.session.doc.feature(id)?.kind {
         FeatureKind::Extrude { sketch, .. }
         | FeatureKind::Revolve { sketch, .. }
@@ -3120,7 +3166,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     // A click in the view's corner is for the dialog open this frame, or for none.
     let corner = app.viewport.corner.take();
     app.viewport.corner_ok = false;
-    sync_feature_edit_sketch(app);
+    sync_feature_edit(app);
     app.op_check.poll();
     if app.tree.redefine.is_none() {
         app.viewport.dialog_rect = None;
@@ -4646,7 +4692,7 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
             need(0, "faces")?;
             ("face.delete", json!({"faces": face_points(0)}))
         }
-        Kind::Align { flip, components } => {
+        Kind::Align { flip, components, axes } => {
             need(0, if *components { "components" } else { "bodies" })?;
             need(1, "what to move from")?;
             need(2, "where to move it to")?;
@@ -4657,7 +4703,11 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
                 }
                 json!({"paths": paths, "flip": flip})
             } else {
-                json!({"bodies": sels(d, 0).body_names(), "flip": flip})
+                let mut p = json!({"bodies": sels(d, 0).body_names(), "flip": flip});
+                if *axes != [true; 3] {
+                    p["axes"] = json!(axes);
+                }
+                p
             };
             for (i, key) in [(1, "from"), (2, "to")] {
                 let snap = d.extra.get(&format!("{key}_snap")).and_then(Value::as_str).unwrap_or("picked");
