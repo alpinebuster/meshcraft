@@ -30,6 +30,21 @@ cargo run --release -p solidcraft -- --sample      # desktop app with a sample p
 cargo run --release -p solidcraft-cli -- commands  # the command registry
 cargo run --release -p solidcraft-cli -- run examples/bracket.json --out bracket.step
 cargo xtask ci                                     # fmt, clippy, tests, icons, assets, layers, wasm
+
+rustup target add wasm32-unknown-unknown
+# cd apps/solidcraft-web && trunk serve --release --no-autoreload
+cd apps/solidcraft-web && trunk serve
+
+docker compose -f packaging/docker/compose.yaml up -d --build   # build the image from your checkout instead
+docker compose -f packaging/docker/compose.yaml up -d      # start
+
+# aarch64, x86_64
+packaging/macos/package.sh --build-only x86_64
+
+dotnet tool install --global wix --version 5.0.2
+wix extension add -g WixToolset.UI.wixext/5.0.2 WixToolset.Util.wixext/5.0.2
+# arm64, x64, x86
+./packaging/windows/package.ps1 -Arch x64
 ```
 
 More commands, the Windows cross-build and the browser build are in [docs/building.md](docs/building.md).
