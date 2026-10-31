@@ -4376,7 +4376,6 @@ name = "solidcraft-kernel"
 version = "0.26.0"
 dependencies = [
  "log",
- "meshlib",
  "proptest",
  "rayon",
  "serde",
@@ -4399,6 +4398,17 @@ dependencies = [
  "serde_json",
  "solidcraft-engine",
  "solidcraft-gpu",
+]
+
+[[package]]
+name = "solidcraft-mesh"
+version = "0.26.0"
+dependencies = [
+ "meshlib",
+ "serde",
+ "serde_json",
+ "solidcraft-geom",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -4578,7 +4588,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
  "windows-sys 0.61.2",

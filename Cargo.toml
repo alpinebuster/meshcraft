@@ -16,6 +16,7 @@ repository = "https://github.com/bherbruck/solidcraft"
 robust = "1.2"
 # internal
 solidcraft-geom = { path = "crates/geom" }
+solidcraft-mesh = { path = "crates/mesh" }
 solidcraft-sketch = { path = "crates/sketch" }
 solidcraft-kernel = { path = "crates/kernel" }
 solidcraft-render = { path = "crates/render" }
@@ -45,7 +46,6 @@ sha2 = "0.10"
 moxcms = { version = "0.8.1", default-features = false, features = ["extended_range"] }
 semver = "1"
 
-meshlib = "3.1.4-560"
 # geometry kernel (Apache-2.0; see plan/adr/0001-geometry-kernel.md). Only crates/kernel uses it.
 truck-modeling = "0.6"
 truck-shapeops = { version = "0.4", default-features = false }
