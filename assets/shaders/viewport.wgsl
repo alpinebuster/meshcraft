@@ -18,6 +18,8 @@ struct U {
     depth: vec4<f32>,  // x = 1: reversed depth (1 near, 0 far); y, z: the faces' push (`FACE_BIAS`)
     tint: vec4<f32>,   // xyz added to a whole hovered body's colour before lighting
     sel: vec4<f32>,    // xyz a whole selected body's colour before lighting
+    product_lights_meta: vec4<f32>, // explicit preview flag and bounded count
+    product_lights: array<vec4<f32>,84>, // position/kind, radiance, axis/cone, attenuation
 };
 
 fn reversed() -> bool {
@@ -241,6 +243,44 @@ fn pushed(z: f32) -> f32 {
     return clamp(z - select(-push, push, reversed()), 0.0, 1.0);
 }
 
+/// A far wall seen through the cut where another body's face lying on it was drawn in front of
+/// it (a shaft in its bore, #9407): its cap colour again, at its depth pulled toward the eye by
+/// `touch_depth`, so it wins over that face, which is faceted another way.
+@fragment
+fn fs_solid_touch(i: TOut, @builtin(front_facing) front: bool) -> CutOut {
+    var o: CutOut;
+    // Derivatives (in `touch_depth`) first, before `solid` may discard.
+    o.depth = touch_depth(i.wp, i.pos.z);
+    o.c = solid(i, front);
+    return o;
+}
+
+@fragment
+fn fs_solid_touch_flat(i: FOut, @builtin(front_facing) front: bool) -> CutOut {
+    let t = flat_fragment(i, front);
+    var o: CutOut;
+    o.depth = touch_depth(t.wp, t.pos.z);
+    o.c = solid(t, front);
+    return o;
+}
+
+/// The depth of `wp` (depth `z`) pulled toward the eye by what may part two faceted copies of
+/// one surface: 3 pixels' width along the view ray (display refinement keeps a facet's sag about
+/// a pixel) and 2 pixels of the face's own depth slope (more where it turns from the eye).
+fn touch_depth(wp: vec3<f32>, z: f32) -> f32 {
+    let px = min(length(dpdx(wp)), length(dpdy(wp)));
+    let slope = max(abs(dpdx(z)), abs(dpdy(z)));
+    var dir = -u.back.xyz;
+    if (u.eye.w > 0.5) { dir = wp - u.eye.xyz; }
+    let len = length(dir);
+    if (len < 1e-12) { return z; }
+    let c = u.vp * vec4<f32>(wp - dir * (3.0 * px / len), 1.0);
+    if (c.w <= 0.0) { return z; }
+    let pulled = c.z / c.w;
+    if (reversed()) { return clamp(max(pulled, z) + 2.0 * slope, 0.0, 1.0); }
+    return clamp(min(pulled, z) - 2.0 * slope, 0.0, 1.0);
+}
+
 /// Depth of the section plane on the view ray through `wp` (a far wall seen through the cut),
 /// never behind the wall itself (`z`).
 fn cap_depth(wp: vec3<f32>, z: f32) -> f32 {
@@ -383,8 +423,13 @@ fn analysis(i: TOut, k: f32) -> vec4<f32> {
         let r = reflect(-v, n);
         var side = cross(v, vec3<f32>(0.0, 0.0, 1.0));
         if (length(side) < 1e-3) { side = vec3<f32>(1.0, 0.0, 0.0); }
-        let s = sin(dot(r, normalize(side)) * u.ana.y * 3.14159265);
-        let c = select(0.08, 0.95, s > 0.0);
+        let x = dot(r, normalize(side));
+        let s = sin(x * u.ana.y * 3.14159265);
+        // A face whose normal lies in the upright plane through the view (every horizontal
+        // face) reflects straight ahead: its sideways part is zero, on the edge between a black
+        // and a white stripe, and rounding picked one or the other from frame to frame while
+        // the view turned (#2153). Straight ahead is white.
+        let c = select(0.08, 0.95, s > 0.0 || abs(x) < 1e-4);
         return out_color(vec4<f32>(vec3<f32>(c), 1.0));
     }
     if (u.ana.x > 4.5) {
@@ -471,6 +516,36 @@ fn shade(i: TOut) -> vec4<f32> {
     return lit(i, 1.0);
 }
 
+fn product_light_unit(v: vec3<f32>) -> vec3<f32> {
+    let scale=max(max(abs(v.x),abs(v.y)),abs(v.z));
+    if scale == 0.0 { return vec3<f32>(0.0,0.0,1.0); }
+    return normalize(v/scale);
+}
+
+// Direction and incident radiance for an unshadowed analytic preview sample.
+fn product_light_sample(k: u32, p: vec3<f32>) -> mat2x3<f32> {
+    let source=u.product_lights[k*4u];
+    let colour=u.product_lights[k*4u+1u];
+    let axis=u.product_lights[k*4u+2u];
+    let falloff=u.product_lights[k*4u+3u];
+    var direction=product_light_unit(source.xyz);
+    var weight=1.0;
+    if source.w > 0.5 {
+        let delta=source.xyz-p;
+        let distance=max(length(delta),falloff.y);
+        direction=product_light_unit(delta);
+        weight=falloff.x/max(distance*distance,0.000001);
+        if source.w == 2.0 {
+            let cosine=dot(product_light_unit(axis.xyz),-direction);
+            var cone=select(0.0,1.0,cosine>=colour.w);
+            if axis.w-colour.w>0.000001 {cone=smoothstep(colour.w,axis.w,cosine);}
+            weight *= cone;
+        }
+        if source.w == 3.0 {weight *= max(dot(product_light_unit(axis.xyz),-direction),0.0);}
+    }
+    return mat2x3<f32>(direction,colour.xyz*weight);
+}
+
 fn lit(i: TOut, visibility: f32) -> vec4<f32> {
     return lit_color(i, visibility, i.c);
 }
@@ -485,6 +560,17 @@ fn lit_color(i: TOut, visibility: f32, base: vec4<f32>) -> vec4<f32> {
     let v = normalize(u.back.xyz);
     var n = normalize(i.n);
     if (dot(n, v) < 0.0) { n = -n; }
+    if u.product_lights_meta.x>0.0 {
+        var radiance=vec3<f32>(0.0);
+        for (var k=0u;k<min(u32(u.product_lights_meta.y),21u);k+=1u) {
+            if u.product_lights[k*4u].w == 4.0 {radiance+=to_linear(base.rgb)*u.product_lights[k*4u+1u].xyz/3.141592653589793;continue;}
+            let sample=product_light_sample(k,i.wp);
+            radiance+=to_linear(base.rgb)*sample[1]*(max(dot(n,sample[0]),0.0)/3.141592653589793);
+        }
+        let mapped=radiance/(vec3<f32>(1.0)+radiance);
+        let encoded=select(mapped*12.92,1.055*pow(mapped,vec3<f32>(1.0/2.4))-vec3<f32>(0.055),mapped>vec3<f32>(0.0031308));
+        return out_color(vec4<f32>(encoded,base.a));
+    }
     let key = normalize(v * 0.8 + vec3<f32>(-0.3, 0.2, 0.6));
     let diff = max(dot(n, key), 0.0);
     let fill = max(dot(n, v), 0.0);
@@ -654,38 +740,96 @@ fn fs_line_all(i: LOut) -> @location(0) vec4<f32> {
     return out_color(i.c);
 }
 
-// Point clouds: each point is a round dot a few pixels across, facing the screen, depth-tested
-// and written like the model's faces, so the model hides the points behind it and they hide it.
-// The colour's alpha carries the dot's size (eighths of a pixel).
+// Point clouds (`view/clouds.rs`): each point is a round dot a few pixels across, facing the
+// screen, depth-tested and written like the model's faces, so the model hides the points behind
+// it and they hide it. The cloud's style colours them by their own colour, a ramp or a palette,
+// and shows only those whose filtered values lie in its ranges or sets.
 
-struct POut {
+struct Cloud {
+    style: vec4<f32>,               // x: colour (0 own, 1 ramp, 2 palette), y: dot size (px), z, w: ramp range
+    filters: array<vec4<f32>, 4>,   // x: kind (0 off, 1 range y…z, 2 whole values y + i for the bits i of w)
+};
+@group(1) @binding(3) var<uniform> cloud: Cloud;
+
+struct CIn {
+    @location(0) p: vec3<f32>,
+    @location(1) v: f32,
+    @location(2) f: vec4<f32>,
+    @location(3) rgb: vec4<f32>,
+};
+
+struct COut {
     @builtin(position) pos: vec4<f32>,
-    @location(0) c: vec4<f32>,
-    @location(1) wp: vec3<f32>,
-    @location(2) at: vec2<f32>,
+    @location(0) wp: vec3<f32>,
+    @location(1) v: f32,
+    @location(2) f: vec4<f32>,
+    @location(3) rgb: vec3<f32>,
+    @location(4) at: vec2<f32>,    // the place on its disc
+    @location(5) @interpolate(flat) has: u32,
 };
 
 @vertex
-fn vs_point(@builtin(vertex_index) vi: u32, @location(0) p: vec3<f32>, @location(1) c: vec4<f32>) -> POut {
+fn vs_cloud_dot(@builtin(vertex_index) vi: u32, i: CIn) -> COut {
     var xs = array<f32, 6>(-1.0, 1.0, 1.0, -1.0, 1.0, -1.0);
     var ys = array<f32, 6>(-1.0, -1.0, 1.0, -1.0, 1.0, 1.0);
     let at = vec2<f32>(xs[vi], ys[vi]);
-    let size = max(c.a * 255.0 / 8.0, 1.0);
-    let centre = u.vp * vec4<f32>(p, 1.0);
-    let half = u.screen.xy * 0.5;
-    var o: POut;
-    o.pos = vec4<f32>(centre.xy + at * size * 0.5 / half * centre.w, centre.z, centre.w);
+    let size = max(cloud.style.y, 1.0);
+    let centre = u.vp * vec4<f32>(i.p, 1.0);
+    var o: COut;
+    o.pos = vec4<f32>(centre.xy + at * size / u.screen.xy * centre.w, centre.z, centre.w);
     // Behind the eye: nothing.
     if (near_z(centre) < 0.0) { o.pos = vec4<f32>(0.0, 0.0, 0.0, -1.0); }
-    o.c = vec4<f32>(c.rgb, 1.0);
-    o.wp = p;
+    o.wp = i.p;
+    o.v = i.v;
+    o.f = i.f;
+    o.rgb = i.rgb.rgb;
+    o.has = u32(round(i.rgb.a * 255.0));
     // Dots under two pixels are squares: a disc that small loses its centre pixel.
     o.at = at * select(1.0, 0.0, size < 2.0);
     return o;
 }
 
+/// Whether filter `f` keeps the value `v`.
+fn cloud_keeps(f: vec4<f32>, v: f32) -> bool {
+    if (f.x < 0.5) { return true; }
+    if (f.x < 1.5) { return v >= f.y && v <= f.z; }
+    let k = i32(round(v)) - i32(round(f.y));
+    return k >= 0 && k < 32 && ((bitcast<u32>(f.w) >> u32(k)) & 1u) != 0u;
+}
+
+fn cloud_ramp(t: f32) -> vec3<f32> {
+    var stops = array<vec3<f32>, 5>(
+        vec3<f32>(40.0, 70.0, 200.0), vec3<f32>(30.0, 170.0, 230.0), vec3<f32>(60.0, 200.0, 90.0),
+        vec3<f32>(240.0, 220.0, 60.0), vec3<f32>(230.0, 70.0, 50.0));
+    let k = clamp(t, 0.0, 1.0) * 4.0;
+    let j = min(u32(k), 3u);
+    return mix(stops[j], stops[j + 1u], k - f32(j)) / 255.0;
+}
+
+fn cloud_palette(v: f32) -> vec3<f32> {
+    var colours = array<vec3<f32>, 10>(
+        vec3<f32>(240.0, 140.0, 40.0), vec3<f32>(245.0, 205.0, 65.0), vec3<f32>(230.0, 65.0, 65.0),
+        vec3<f32>(165.0, 75.0, 190.0), vec3<f32>(65.0, 190.0, 115.0), vec3<f32>(75.0, 150.0, 220.0),
+        vec3<f32>(240.0, 120.0, 180.0), vec3<f32>(140.0, 105.0, 75.0), vec3<f32>(120.0, 215.0, 215.0),
+        vec3<f32>(190.0, 190.0, 80.0));
+    if (v < -0.5) { return vec3<f32>(150.0, 160.0, 176.0) / 255.0; }
+    return colours[u32(round(v)) % 10u] / 255.0;
+}
+
+
 @fragment
-fn fs_point(i: POut) -> @location(0) vec4<f32> {
-    if (clipped(i.wp) || dot(i.at, i.at) > 1.0) { discard; }
-    return out_color(i.c);
+fn fs_cloud(o: COut) -> @location(0) vec4<f32> {
+    var out = clipped(o.wp) || dot(o.at, o.at) > 1.0;
+    for (var k = 0u; k < 4u; k++) {
+        out = out || (((o.has >> k) & 1u) != 0u && !cloud_keeps(cloud.filters[k], o.f[k]));
+    }
+    if (out) { discard; }
+    var c = o.rgb;
+    let mode = cloud.style.x;
+    if ((o.has & 16u) != 0u && mode > 1.5) {
+        c = cloud_palette(o.v);
+    } else if ((o.has & 16u) != 0u && mode > 0.5) {
+        c = cloud_ramp((o.v - cloud.style.z) / max(cloud.style.w - cloud.style.z, 1e-12));
+    }
+    return out_color(vec4<f32>(c, 1.0));
 }
