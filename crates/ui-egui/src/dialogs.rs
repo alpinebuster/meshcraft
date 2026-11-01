@@ -107,20 +107,20 @@ crate::dialog_descriptor::dialog_descriptors! {
     pub enum Kind {
         Shell("solid.shell", "SHELL", [("Faces/Body", FACES, true)],
             FeatureKind::Shell { thickness, .. }) {
-            thickness: String = "2 mm".into() => thickness.to_string(),
+            thickness: String = "2 mm".into() => shown_expr(thickness, ValueKind::Length),
         } => json!({"thickness": thickness});
         Draft("solid.draft", "DRAFT", [("Faces", FACES, true), ("Neutral plane", PLANES | PLANAR_FACES, false)],
             FeatureKind::Draft { angle, .. }) {
-            angle: String = "5 deg".into() => angle.to_string(),
+            angle: String = "5 deg".into() => shown_expr(angle, ValueKind::Angle),
         } => json!({"angle": angle});
         // A point picked as well puts the plane through it instead of at the distance.
         OffsetPlane("construct.plane.offset", "OFFSET PLANE", [("Plane", PLANES | PLANAR_FACES, false), ("Through point", selection::VERTICES | selection::POINTS, false)],
             FeatureKind::ConstructionPlane { plane: PlaneRef::Offset { distance, .. } }) {
-            offset: String = "0 mm".into() => distance.to_string(),
+            offset: String = "0 mm".into() => shown_expr(distance, ValueKind::Length),
         } => json!({"offset": offset});
         AnglePlane("construct.plane.at_angle", "PLANE AT ANGLE", [("Plane", PLANES | PLANAR_FACES, false), ("Axis", AXIS_PICKS, false)],
             FeatureKind::ConstructionPlane { plane: PlaneRef::AtAngle { angle, .. } }) {
-            angle: String = "45 deg".into() => angle.to_string(),
+            angle: String = "45 deg".into() => shown_expr(angle, ValueKind::Angle),
         } => json!({"angle": angle});
         Scale("solid.scale", "SCALE", [("Bodies", BODIES, true)],
             FeatureKind::Scale { factor, .. }) {
@@ -128,21 +128,21 @@ crate::dialog_descriptor::dialog_descriptors! {
         } => json!({"factor": factor});
         OffsetFaces("solid.offset_face", "OFFSET FACE", [("Faces", FACES, true)],
             FeatureKind::OffsetFace { distance, .. }) {
-            distance: String = "2 mm".into() => distance.to_string(),
+            distance: String = "2 mm".into() => shown_expr(distance, ValueKind::Length),
         } => json!({"distance": distance});
         Stock("solid.bounding_solid", "STOCK", [("Bodies (all if none)", BODIES, true)],
             FeatureKind::BoundingSolid { margin, .. }) {
-            margin: String = "2 mm".into() => margin.to_string(),
+            margin: String = "2 mm".into() => shown_expr(margin, ValueKind::Length),
         } => json!({"margin": margin});
         Pipe("solid.pipe", "PIPE", [("Path", CURVES, true)],
             FeatureKind::Pipe { diameter, wall, operation, .. }) {
-            diameter: String = "5 mm".into() => diameter.to_string(),
-            wall: String = String::new() => wall.as_deref().map(str::to_string).unwrap_or_default(),
+            diameter: String = "5 mm".into() => shown_expr(diameter, ValueKind::Length),
+            wall: String = String::new() => wall.as_deref().map(|e| shown_expr(e, ValueKind::Length)).unwrap_or_default(),
             operation: usize = 0 => op_index(operation),
         } => json!({"diameter": diameter, "operation": OPS.get(*operation).copied().unwrap_or("new")});
         Emboss("solid.emboss", "EMBOSS", [("Profiles", PROFILES, true), ("Target Face (optional)", FACES, false)],
             FeatureKind::Emboss { depth, deboss, .. }) {
-            depth: String = "1 mm".into() => depth.to_string(),
+            depth: String = "1 mm".into() => shown_expr(depth, ValueKind::Length),
             deboss: bool = false => *deboss,
         } => json!({"depth": depth, "mode": if *deboss { "deboss" } else { "emboss" }});
         ; custom {
@@ -1191,6 +1191,9 @@ impl Dialog {
         d.sync_thread(s);
         d.sync_material(s);
         d.advance();
+        // Preselected items are already the dialog's inputs: the control reply and the first
+        // viewport paint must see the same measurement, without waiting for the panel to draw.
+        update_measure(app, &mut d);
         Some(d)
     }
 
@@ -1606,6 +1609,9 @@ impl Dialog {
     /// the command starts. The island inside another profile's hole is left out, or it would fill
     /// the hole. False when the click is not one of those (the caller selects it as usual).
     pub fn pick_sketch(&mut self, s: &Session, id: u64) -> bool {
+        if self.refuse_sketch(s, id) {
+            return true;
+        }
         if self.active != 0
             || !matches!(self.kind, Kind::Extrude { .. } | Kind::Revolve { .. } | Kind::Emboss { .. })
             || !self.inputs.first().is_some_and(|i| i.accept & PROFILES != 0)
@@ -1630,6 +1636,21 @@ impl Dialog {
         true
     }
 
+    /// A sketch clicked (in the view, the Browser or the History) while a pattern or Mirror waits
+    /// for its bodies or features: a sketch is neither, so the dialog says what to do instead of
+    /// taking nothing in silence (#10057). False when the click is not one of those.
+    pub fn refuse_sketch(&mut self, s: &Session, id: u64) -> bool {
+        if self.active != 0
+            || !is_pattern(&self.kind)
+            || !self.inputs.first().is_some_and(|i| i.accept == BODIES || i.accept == selection::FEATURES)
+            || !s.doc.feature(id).is_some_and(|f| matches!(f.kind, FeatureKind::Sketch { .. }))
+        {
+            return false;
+        }
+        self.error = Some(SKETCH_NOT_OBJECT.to_string());
+        true
+    }
+
     /// A pick in the viewport (already accepted by the active input).
     pub fn pick(&mut self, s: &Session, sel: Sel) {
         if self.take_extrude_target(s, &sel) {
@@ -1646,8 +1667,9 @@ impl Dialog {
             self.profile_selection_changed = true;
         }
         let measure = matches!(self.kind, Kind::Measure { .. });
-        // The chat's picks stay what was clicked: a rim is one edge there, not its pieces.
-        let one = measure || matches!(self.kind, Kind::ChatContext);
+        // The chat's picks stay what was clicked: a rim is one edge there, not its pieces. So do
+        // print faces: a click on one takes it out, not the other pieces of its surface in.
+        let one = measure || matches!(self.kind, Kind::ChatContext | Kind::SaveMesh(_));
         let sel = if measure { crate::viewport::measurement_selection(s, &sel) } else { sel };
         let chain = matches!(self.kind, Kind::Fillet { chain: true, .. });
         let single =
@@ -2411,6 +2433,11 @@ fn objects_label(accept: Accept) -> &'static str {
     if accept == selection::FEATURES { "Features" } else { "Objects" }
 }
 
+/// What a pattern or Mirror says when a sketch is clicked for its objects (#10057). It names what
+/// to pick, so it shows as a hint rather than an error ([`missing_pick`]).
+const SKETCH_NOT_OBJECT: &str =
+    "Pick bodies or features: a sketch is neither. Repeat its curves with the sketch's own Pattern or Mirror, or extrude it first.";
+
 fn is_pattern(k: &Kind) -> bool {
     matches!(k, Kind::PatternRect { .. } | Kind::PatternCirc { .. } | Kind::PathPattern { .. } | Kind::Mirror)
 }
@@ -2421,7 +2448,8 @@ fn object_type_row(d: &mut Dialog, ui: &mut egui::Ui) {
     let Some(inp) = d.inputs.first_mut() else { return };
     let cur = usize::from(inp.accept == selection::FEATURES);
     let mut ty = cur;
-    choice_row(ui, "Object Type", "pat_obj", &mut ty, &["Bodies", "Features"]);
+    // What the two kinds are, and that a sketch is neither (#10057).
+    choice_row(ui, "Object Type", "pat_obj", &mut ty, &["Bodies", "Features"]).on_hover_text(crate::i18n::tr("ui.pattern_object_type_tip"));
     if ty != cur {
         inp.accept = if ty == 1 { selection::FEATURES } else { BODIES };
         inp.label = objects_label(inp.accept);
@@ -3452,7 +3480,11 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     {
         plane["fixed"] = json!(true);
         let before = app.settled_cam();
-        match app.run("sketch.create", json!({"plane":plane})) {
+        let mut params = json!({"plane":plane});
+        if app.preferences.sketch_face_activates_part {
+            params["activate_part"] = json!(true);
+        }
+        match app.run("sketch.create", params) {
             Ok(_) => {
                 app.look_at_opened_sketch(before);
                 cancel = true;
@@ -3863,7 +3895,10 @@ fn hole_defaults(s: &Session) -> Kind {
 pub fn start_sketch(app: &mut SolveApp, sel: &Sel) -> Result<(), String> {
     let mut params = match sel {
         Sel::Plane { name } => json!({ "plane": shown_origin_plane(app, name).unwrap_or_else(|| json!(name)) }),
-        Sel::Face { .. } => json!({ "plane": crate::sketch_attachment_ui::face_plane(app, sel).ok_or("Selected face placement no longer exists")? }),
+        Sel::Face { .. } => json!({
+            "plane": crate::sketch_attachment_ui::face_plane(app, sel).ok_or("Selected face placement no longer exists")?,
+            "activate_part": app.preferences.sketch_face_activates_part,
+        }),
         _ => return Err("Select an origin plane, construction plane or planar body face".into()),
     };
     if let Sel::Plane { name } = sel
@@ -5710,7 +5745,7 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
                 AxisRef::Model { geo } if model_axis_sel(s, geo).is_none() => serde_json::to_value(geo).ok(),
                 _ => None,
             };
-            d.kind = Kind::Revolve { angle: angle.to_string(), operation: op_index(operation), axis: stored_axis };
+            d.kind = Kind::Revolve { angle: shown_expr(angle, ValueKind::Angle), operation: op_index(operation), axis: stored_axis };
             d.extra.insert("convention".into(), json!(convention));
             if let Some(a2) = angle2 {
                 d.extra.insert("angle2".into(), json!(a2));
@@ -5749,17 +5784,17 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
                 |i: usize, p: Vec3| f.edge_names.get(i).and_then(|name| named_refill(s, body.as_deref(), name, p, true)).or_else(|| edge_sel(s, p));
             let chamfer = matches!(f.kind, FeatureKind::Chamfer { .. });
             let mut d = start(if chamfer { "solid.chamfer" } else { "solid.fillet" })?;
-            d.kind = fillet_kind(radius, chamfer);
+            d.kind = fillet_kind(&shown_expr(radius, ValueKind::Length), chamfer);
             if let Kind::Fillet { chain, ctype, distance2, angle, flip, .. } = &mut d.kind {
                 *chain = false;
                 // An unequal chamfer: two distances, or a distance and an angle.
                 if let FeatureKind::Chamfer { distance2: d2, angle: a, flip: f, .. } = &f.kind {
                     if let Some(v) = d2 {
                         *ctype = 1;
-                        *distance2 = v.to_string();
+                        *distance2 = shown_expr(v, ValueKind::Length);
                     } else if let Some(v) = a {
                         *ctype = 2;
-                        *angle = v.to_string();
+                        *angle = shown_expr(v, ValueKind::Angle);
                     }
                     *flip = *f;
                 }
@@ -6420,7 +6455,7 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             }
             d.kind = Kind::Thread {
                 designation: designation.clone().unwrap_or_default(),
-                length: length.as_deref().map(str::to_string).unwrap_or_default(),
+                length: length.as_deref().map(|e| shown_expr(e, ValueKind::Length)).unwrap_or_default(),
                 handedness: *handedness,
                 suggested: None,
                 of: Vec::new(),
@@ -6471,8 +6506,8 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             let mut d = start(if *web { "solid.web" } else { "solid.rib" })?;
             d.kind = Kind::Rib {
                 web: *web,
-                thickness: thickness.to_string(),
-                depth: depth.as_deref().map(str::to_string).unwrap_or_default(),
+                thickness: shown_expr(thickness, ValueKind::Length),
+                depth: depth.as_deref().map(|e| shown_expr(e, ValueKind::Length)).unwrap_or_default(),
                 flip: *flip,
                 normal: *normal,
             };

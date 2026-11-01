@@ -1457,6 +1457,51 @@ mod tests {
     }
 
     #[test]
+    fn body_rename_reusing_a_hidden_name_preserves_visibility_and_history() {
+        for computed in [false, true] {
+            for hidden in [false, true] {
+                let mut s = Session::default();
+                two_boxes(&mut s);
+                let retired = s.doc.features[0].id;
+                run(&mut s, "browser.visibility", json!({"items": ["A"], "visible": false}));
+                run(&mut s, "timeline.delete", json!({"feature": retired}));
+                if hidden {
+                    run(&mut s, "browser.visibility", json!({"items": ["B"], "visible": false}));
+                }
+                let before = s.visibility.clone();
+                assert_eq!(s.body_visible("B"), !hidden);
+                if computed {
+                    let mut scratch = s.scratch();
+                    run(&mut scratch, "body.rename", json!({"body": "B", "name": "A"}));
+                    s.accept_computed(scratch);
+                } else {
+                    run(&mut s, "body.rename", json!({"body": "B", "name": "A"}));
+                }
+                assert_eq!(names(&s), ["A"]);
+                assert_eq!(s.body_visible("A"), !hidden, "computed={computed}, hidden={hidden}: rename preserves visibility");
+                assert_eq!(s.visibility.hidden_bodies, if hidden { vec!["A"] } else { vec![] });
+                run(&mut s, "edit.undo", json!({}));
+                assert_eq!(names(&s), ["B"]);
+                assert_eq!(s.visibility, before, "undo restores the original hidden names, including the deleted body's");
+                assert_eq!(s.body_visible("B"), !hidden, "undo must not transfer the stale hide to B");
+                if !hidden {
+                    run(&mut s, "edit.undo", json!({}));
+                    assert_eq!(names(&s), ["A", "B"]);
+                    assert!(!s.body_visible("A") && s.body_visible("B"), "restoring the deleted body restores its own visibility");
+                    run(&mut s, "edit.redo", json!({}));
+                }
+                run(&mut s, "edit.redo", json!({}));
+                assert_eq!(s.body_visible("A"), !hidden, "redo preserves visibility");
+                let mut saved = (*s.doc).clone();
+                saved.visibility = s.visibility.clone();
+                let reopened = Session::new(serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap());
+                assert_eq!(names(&reopened), ["A"]);
+                assert_eq!(reopened.body_visible("A"), !hidden, "reopening preserves visibility");
+            }
+        }
+    }
+
+    #[test]
     fn renamed_body_keeps_its_users() {
         let mut s = Session::default();
         run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10}));
@@ -1472,6 +1517,82 @@ mod tests {
         assert!(s.execute("body.rename", &json!({"body": "Lid", "name": " "})).is_err());
         run(&mut s, "edit.undo", json!({}));
         assert_eq!(names(&s)[1], b);
+    }
+
+    /// #10123: renaming a piece cut off a frame member must land on that piece after a rebuild,
+    /// not on the first line's member. The repro is the issue's, verbatim.
+    #[test]
+    fn renaming_a_cut_off_frame_piece_lands_on_that_piece_after_rebuild() {
+        let dir = std::env::temp_dir().join(format!("sc-10123-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let saved = dir.join("rename_repro.sc");
+        let mut s = Session::default();
+        run(&mut s, "document.units", json!({"units": "in"}));
+        run(
+            &mut s,
+            "timeline.add",
+            json!({"feature": {
+                "id": 1, "name": "Lines", "type": "sketch", "suppressed": false,
+                "plane": {"name": "XY", "type": "origin"},
+                "sketch": {
+                    "constraints": [{"id": "k1", "p": 0, "q": 1, "type": "coincident"}],
+                    "counters": {"k": 1, "l": 2},
+                    "curves": [
+                        {"a": 1, "b": 2, "construction": false, "id": "l1", "type": "line"},
+                        {"a": 3, "b": 4, "construction": false, "id": "l2", "type": "line"}
+                    ],
+                    "points": [
+                        {"fixed": true, "id": "origin", "pos": [0.0, 0.0]},
+                        {"fixed": false, "id": "l1.start", "pos": [0.0, 0.0]},
+                        {"fixed": false, "id": "l1.end", "pos": [100.0, 0.0]},
+                        {"fixed": false, "id": "l2.start", "pos": [0.0, 50.0]},
+                        {"fixed": false, "id": "l2.end", "pos": [100.0, 50.0]}
+                    ]
+                }
+            }}),
+        );
+        run(
+            &mut s,
+            "timeline.add",
+            json!({"feature": {
+                "id": 2, "name": "Members", "type": "frame_member", "suppressed": false,
+                "body_names": ["A", "B"], "names": {"l1": "A", "l2": "B"}, "param_names": ["d1"],
+                "path_sketch": 1,
+                "profile": {"profile": {"diameter": "10 mm", "kind": "round_bar"}, "source": "library"}
+            }}),
+        );
+        run(
+            &mut s,
+            "timeline.add",
+            json!({"feature": {
+                "id": 3, "name": "Cutter", "type": "box", "suppressed": false,
+                "body_names": ["Cutter"], "corner": [45.0, 40.0, -10.0],
+                "height": "20 mm", "length": "10 mm", "width": "20 mm",
+                "operation": "new_body", "param_names": ["d2", "d3", "d4"]
+            }}),
+        );
+        run(
+            &mut s,
+            "timeline.add",
+            json!({"feature": {
+                "id": 4, "name": "Cut B", "type": "combine", "suppressed": false,
+                "operation": "cut", "target": "B", "tools": ["Cutter"], "keep_tools": true
+            }}),
+        );
+        let sorted = |v: Vec<String>| {
+            let mut v = v;
+            v.sort();
+            v
+        };
+        assert_eq!(sorted(names(&s)), ["A", "B", "B (1)", "Cutter"]);
+        run(&mut s, "body.rename", json!({"body": "B (1)", "name": "B2"}));
+        assert_eq!(sorted(names(&s)), ["A", "B", "B2", "Cutter"]);
+        run(&mut s, "file.save_as", json!({"path": saved.to_string_lossy()}));
+        let mut reopened = Session::default();
+        run(&mut reopened, "doc.open", json!({"path": saved.to_string_lossy()}));
+        assert_eq!(sorted(names(&reopened)), ["A", "B", "B2", "Cutter"], "the rename must not move to member A on rebuild");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

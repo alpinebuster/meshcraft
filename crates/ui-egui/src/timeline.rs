@@ -500,6 +500,10 @@ fn select_range(app: &mut SolveApp, order: &[u64], id: u64, add: bool) {
 /// Give a History feature click to a compatible active dialog input in any layout.
 /// Plain clicks keep an existing pick; Ctrl/Command clicks toggle it off.
 pub(crate) fn pick_feature_into_dialog(app: &mut SolveApp, id: u64, modifiers: egui::Modifiers) -> bool {
+    // A pattern or Mirror says why it does not take a sketch (#10057).
+    if app.dialog.as_mut().is_some_and(|d| d.refuse_sketch(&app.session, id)) {
+        return true;
+    }
     let Some(d) = app.dialog.as_mut().filter(|d| d.active_input().is_some_and(|i| i.accept & crate::selection::FEATURES != 0)) else {
         return false;
     };
@@ -664,18 +668,19 @@ pub fn timeline(app: &mut SolveApp, ui: &mut egui::Ui) {
         app.shell.history = Some(rect);
         crate::scenario::publish_rect("history:card", rect);
         let mut child = ui.new_child(UiBuilder::new().id_salt("sc_timeline").max_rect(rect));
-        Container::paint_frame(ui.painter(), Container::new(ui.ctx(), Surface::Panel).frame(ui.ctx(), t.timeline, crate::frame::Side::Left), rect);
+        Container::paint_panel_frame(
+            ui.painter(),
+            Container::new(ui.ctx(), Surface::Panel).frame(ui.ctx(), t.timeline, crate::frame::Side::Left),
+            rect,
+        );
         child.set_clip_rect(rect);
         timeline_contents(app, &mut child, true);
     } else {
-        let response = Container::new(ui.ctx(), Surface::Panel)
-            .edge("sc_timeline", Edge::Bottom)
-            .exact_size(40.0)
-            .frame(Container::new(ui.ctx(), Surface::Panel).edge_frame(t.timeline))
-            .show(ui, |ui| {
-                timeline_contents(app, ui, false);
-            });
-        let frame = Container::new(ui.ctx(), Surface::Panel).edge_frame(t.timeline);
+        let host = Container::new(ui.ctx(), Surface::Panel);
+        let response = host.show_edge(ui, host.edge("sc_timeline", Edge::Bottom).exact_size(40.0), host.edge_frame(t.timeline), |ui| {
+            timeline_contents(app, ui, false);
+        });
+        let frame = host.edge_frame(t.timeline);
         Container::paint_inset(ui.painter(), response.response.rect - frame.outer_margin, frame);
         app.shell.history = Some(response.response.rect);
         crate::scenario::publish_rect("history:strip", response.response.rect);
