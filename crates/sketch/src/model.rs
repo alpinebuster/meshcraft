@@ -8,6 +8,8 @@ pub const MAX_POINTS: usize = 20_000;
 pub const MAX_CONSTRAINTS: usize = 40_000;
 /// Curves need points, so this follows the point cap.
 pub const MAX_CURVES: usize = MAX_POINTS;
+// [`SketchError::TooLarge`]'s message names this number; keep them matched (#10874).
+const _: () = assert!(MAX_POINTS == 20_000);
 
 /// Largest coordinate or dimension value (mm) a sketch accepts.
 pub const MAX_COORD: f64 = 1e9;
@@ -37,7 +39,12 @@ pub enum SketchError {
     Duplicate(String),
     #[error("invalid value: {0}")]
     Invalid(String),
-    #[error("sketch is too large")]
+    /// Cap hit on points, curves or constraints ([`MAX_POINTS`], [`MAX_CURVES`],
+    /// [`MAX_CONSTRAINTS`]). Insert SVG/DXF of a dense drawing (a floorplan) often hits this;
+    /// scale alone does not reduce how many curves the file has (#10874).
+    #[error(
+        "sketch is too large (at most 20000 points or curves); simplify the drawing or split it across sketches — changing scale does not reduce how many curves it has"
+    )]
     TooLarge,
 }
 
@@ -104,6 +111,10 @@ pub enum CurveKind {
         /// Explicit cyclic C2 fit interpolation; absent retains natural endpoints.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         periodic: bool,
+        /// A control spline's own knots and weights (a projected free-form edge as the exact
+        /// curve it is); none: the clamped uniform B-spline over its points, all weights 1.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nurbs: Option<crate::Nurbs>,
     },
     /// Conic from `a` to `b` shaped by the `apex` point and `rho` in (0, 1) (0.5 parabola,
     /// less elliptical, more hyperbolic).
@@ -730,6 +741,9 @@ pub struct Sketch {
     /// 3D curves (world coordinates) carried by the sketch.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub wires: Vec<crate::wire::Wire>,
+    /// Curves drawn from formulas (#8352): the fit point splines they place, with their formulas.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub equations: Vec<crate::equation::EquationCurve>,
     /// Next number per id prefix (`l` → l1, l2…).
     #[serde(default)]
     counters: std::collections::BTreeMap<String, u64>,
@@ -759,6 +773,7 @@ impl Sketch {
             offsets: Vec::new(),
             freeform_offsets: Vec::new(),
             wires: Vec::new(),
+            equations: Vec::new(),
             counters: Default::default(),
             view: SketchView::default(),
         }
@@ -823,16 +838,20 @@ impl Sketch {
     }
 
     pub fn point_index(&self, id: &str) -> Option<usize> {
+        #[cfg(test)]
+        crate::tests::count_id_search();
         self.points.iter().position(|p| p.id == id)
     }
     pub fn curve_index(&self, id: &str) -> Option<usize> {
+        #[cfg(test)]
+        crate::tests::count_id_search();
         self.curves.iter().position(|c| c.id == id)
     }
     pub fn point(&self, i: usize) -> Option<Vec2> {
         self.points.get(i).map(|p| p.pos)
     }
 
-    fn check_pos(p: Vec2) -> Result<Vec2> {
+    pub(crate) fn check_pos(p: Vec2) -> Result<Vec2> {
         if in_range(p) { Ok(p) } else { Err(SketchError::Invalid(format!("point {:?}", [p.x, p.y]))) }
     }
 
@@ -963,13 +982,46 @@ impl Sketch {
     }
 
     pub fn add_constraint(&mut self, kind: ConstraintKind, param: Option<String>) -> Result<String> {
+        self.validate(&kind)?;
+        if let Some(same) = self.same_constraint(&kind) {
+            return Ok(same.to_string());
+        }
         if self.constraints.len() >= MAX_CONSTRAINTS {
             return Err(SketchError::TooLarge);
         }
-        self.validate(&kind)?;
         let id = self.fresh("k")?;
         self.constraints.push(Constraint { id: id.clone(), kind, param, driven: false, text: None });
         Ok(id)
+    }
+
+    /// The id of a geometric (not dimensional) constraint that already says what `kind` says: the
+    /// same kind on the same entities, in either order where the order doesn't matter.
+    pub fn same_constraint(&self, kind: &ConstraintKind) -> Option<&str> {
+        use ConstraintKind::*;
+        let pair = |x: usize, y: usize| if x <= y { (x, y) } else { (y, x) };
+        let key = |k: &ConstraintKind| -> Option<(u8, usize, usize, usize)> {
+            Some(match *k {
+                Coincident { p, q } => (0, pair(p, q).0, pair(p, q).1, 0),
+                PointOnCurve { p, c } => (1, p, c, 0),
+                Horizontal { l } => (2, l, 0, 0),
+                Vertical { l } => (3, l, 0, 0),
+                HorizontalPoints { p, q } => (4, pair(p, q).0, pair(p, q).1, 0),
+                VerticalPoints { p, q } => (5, pair(p, q).0, pair(p, q).1, 0),
+                Parallel { a, b } => (6, pair(a, b).0, pair(a, b).1, 0),
+                Perpendicular { a, b } => (7, pair(a, b).0, pair(a, b).1, 0),
+                Collinear { a, b } => (8, pair(a, b).0, pair(a, b).1, 0),
+                Tangent { a, b } => (9, pair(a, b).0, pair(a, b).1, 0),
+                Equal { a, b } => (10, pair(a, b).0, pair(a, b).1, 0),
+                Concentric { a, b } => (11, pair(a, b).0, pair(a, b).1, 0),
+                Midpoint { p, l } => (12, p, l, 0),
+                Symmetric { p, q, l } => (13, pair(p, q).0, pair(p, q).1, l),
+                Fix { p } => (14, p, 0, 0),
+                Smooth { a, b } => (15, pair(a, b).0, pair(a, b).1, 0),
+                _ => return None,
+            })
+        };
+        let want = key(kind)?;
+        self.constraints.iter().find(|c| key(&c.kind) == Some(want)).map(|c| c.id.as_str())
     }
 
     /// Check indices and entity kinds of a constraint.
@@ -1463,8 +1515,9 @@ impl Sketch {
     }
 
     /// Exact boundary segments of a free-form curve: ellipses as four conics, conics, fit
-    /// splines and control splines up to `MAX_BEZIER_DEGREE` as Béziers. None for other curves
-    /// (and for higher-degree splines, which stay polylines).
+    /// splines and control splines up to `MAX_BEZIER_DEGREE` as Béziers (one a knot span for a
+    /// spline with its own knots, conics for a rational quadratic one). None for other curves
+    /// (and for higher-degree or other rational splines, which stay polylines).
     pub fn exact_segs(&self, ci: usize) -> Option<Vec<Seg2>> {
         let cu = self.curves.get(ci)?;
         let pt = |i: &usize| self.point(*i);
@@ -1491,7 +1544,11 @@ impl Sketch {
                     crate::curves::fit_beziers_mode(&p, *periodic).ok()?.into_iter().map(|[p0, p1, p2, p3]| Seg2::Cubic { p0, p1, p2, p3 }).collect(),
                 )
             }
-            CurveKind::Spline { pts, control: true, degree, .. } if (*degree as usize) <= solidcraft_geom::MAX_BEZIER_DEGREE => {
+            CurveKind::Spline { pts, control: true, degree, nurbs: Some(nurbs), .. } => {
+                let p: Vec<Vec2> = pts.iter().map(pt).collect::<Option<_>>()?;
+                nurbs.segs(&p, *degree)
+            }
+            CurveKind::Spline { pts, control: true, degree, nurbs: None, .. } if (*degree as usize) <= solidcraft_geom::MAX_BEZIER_DEGREE => {
                 let p: Vec<Vec2> = pts.iter().map(pt).collect::<Option<_>>()?;
                 let k = (*degree as usize).min(p.len().saturating_sub(1)).max(1);
                 Some(crate::curves::bspline_beziers(&p, k).iter().filter_map(|c| solidcraft_geom::bezier(c)).collect())
@@ -1521,9 +1578,9 @@ impl Sketch {
                 (Some(c), Some(m)) => crate::curves::ellipse_polyline(c, m, *r),
                 _ => Vec::new(),
             },
-            CurveKind::Spline { pts, control, degree, periodic } => {
+            CurveKind::Spline { pts, control, degree, periodic, nurbs } => {
                 let p: Option<Vec<Vec2>> = pts.iter().map(pt).collect();
-                p.map(|p| crate::curves::spline_polyline_mode(&p, *control, *degree, *periodic)).unwrap_or_default()
+                p.map(|p| crate::curves::spline_polyline_mode(&p, *control, *degree, *periodic, nurbs.as_ref())).unwrap_or_default()
             }
             CurveKind::Conic { a, b, apex, rho } => match (pt(a), pt(apex), pt(b)) {
                 (Some(a), Some(x), Some(b)) => crate::curves::conic_polyline(a, x, b, *rho),
@@ -1559,7 +1616,13 @@ impl Sketch {
                 }
                 "e"
             }
-            CurveKind::Spline { pts, control, degree, periodic } => {
+            CurveKind::Spline { pts, control, degree, periodic, nurbs } => {
+                if let Some(nurbs) = nurbs {
+                    if !*control || *periodic {
+                        return Err(SketchError::Invalid("only an open control spline has its own knots".into()));
+                    }
+                    nurbs.check(pts.len(), *degree)?;
+                }
                 if pts.len() < 2 || pts.len() > crate::curves::MAX_SPLINE_POINTS || !(1..=solidcraft_geom::MAX_BEZIER_DEGREE as u8).contains(degree) {
                     return Err(SketchError::Invalid(format!(
                         "a spline needs 2 to 500 points and degree 1 to {}",
@@ -1599,7 +1662,12 @@ impl Sketch {
                 owned.extend(c.kind.point_ids());
             }
         }
+        let on_ends = self.points_on_ends_of(which);
         self.drop_curves(which);
+        for (p, q) in on_ends {
+            // Only a full sketch refuses one more; the point then comes loose as before.
+            let _ = self.add_constraint(ConstraintKind::Coincident { p, q }, None);
+        }
         let mut orphans: Vec<usize> = owned.into_iter().filter(|p| *p != 0 && !self.point_used_by_curve(*p)).collect();
         orphans.sort_unstable();
         orphans.dedup();
@@ -1609,10 +1677,40 @@ impl Sketch {
         self.prune_patterns();
     }
 
+    /// Points held on one of the curves `which` exactly at one of its ends, and that end: a point
+    /// on a curve at its end meets whatever else ends there, so when the curve goes the two are
+    /// tied instead of coming apart (a trimmed circle ending on a line where a fillet starts kept
+    /// its end there only through the line). Pairs already in one coincident group are left out.
+    fn points_on_ends_of(&self, which: &[usize]) -> Vec<(usize, usize)> {
+        let mut groups: Vec<usize> = (0..self.points.len()).collect();
+        for c in &self.constraints {
+            if let ConstraintKind::Coincident { p, q } = c.kind
+                && p < groups.len()
+                && q < groups.len()
+            {
+                union(&mut groups, p, q);
+            }
+        }
+        let mut pairs = Vec::new();
+        for k in &self.constraints {
+            let ConstraintKind::PointOnCurve { p, c } = k.kind else { continue };
+            let Some((a, b)) = which.contains(&c).then(|| self.curves.get(c).and_then(|k| k.kind.ends())).flatten() else { continue };
+            let Some(at) = self.point(p) else { continue };
+            for end in [a, b] {
+                let Some(e) = self.point(end) else { continue };
+                if end != p && at.dist(e) <= crate::END_TOL && find(&mut groups, p) != find(&mut groups, end) {
+                    union(&mut groups, p, end);
+                    pairs.push((p, end));
+                }
+            }
+        }
+        pairs
+    }
+
     /// Points held together only through points about to go stay together: two rectangles'
     /// corners made coincident with one arc end are tied to each other when a trim takes that
     /// end away, instead of coming apart where they still meet.
-    fn keep_ties_through(&mut self, gone: &[usize]) {
+    pub(crate) fn keep_ties_through(&mut self, gone: &[usize]) {
         if gone.is_empty() {
             return;
         }
@@ -1649,13 +1747,15 @@ impl Sketch {
         }
     }
 
-    fn point_used_by_curve(&self, p: usize) -> bool {
+    pub(crate) fn point_used_by_curve(&self, p: usize) -> bool {
         self.curves.iter().any(|c| c.kind.uses(p))
     }
 
     /// Remove curves only (points stay), remapping constraints.
     fn drop_curves(&mut self, which: &[usize]) {
         self.prune_offsets_for_removed_curves(which);
+        let removed: std::collections::BTreeSet<String> = which.iter().filter_map(|i| self.curves.get(*i).map(|c| c.id.clone())).collect();
+        self.prune_equations(&removed);
         let mut cmap = vec![None; self.curves.len()];
         let mut n = 0;
         for (i, slot) in cmap.iter_mut().enumerate() {
@@ -1757,9 +1857,29 @@ impl Sketch {
         }
     }
 
-    /// Axis-aligned bounds of all geometry (for views).
+    /// Axis-aligned bounds of all geometry (for views). An arc's are exact: its polyline's points
+    /// need not reach the circle's extremes (a whole circle is one arc, whose chords start at its
+    /// start angle), so the quarter points it sweeps through are added.
     pub fn bounds(&self) -> Option<(Vec2, Vec2)> {
-        let b: Aabb2 = (0..self.curves.len()).flat_map(|i| self.segs(i)).flat_map(|s| s.polyline(0.5)).collect();
+        let extremes = |s: &Seg2| -> Vec<Vec2> {
+            let Seg2::Arc { center, radius, start, sweep } = *s else { return Vec::new() };
+            let (lo, hi) = if sweep >= 0.0 { (start, start + sweep) } else { (start + sweep, start) };
+            let quarter = std::f64::consts::FRAC_PI_2;
+            let first = (lo / quarter).ceil() as i64;
+            let last = (hi / quarter).floor() as i64;
+            if !(lo.is_finite() && hi.is_finite()) || last - first > 4 {
+                return Vec::new();
+            }
+            (first..=last).map(|k| center + Vec2::from_angle(k as f64 * quarter) * radius).collect()
+        };
+        let b: Aabb2 = (0..self.curves.len())
+            .flat_map(|i| self.segs(i))
+            .flat_map(|s| {
+                let mut pts = s.polyline(0.5);
+                pts.extend(extremes(&s));
+                pts
+            })
+            .collect();
         (!b.is_empty()).then_some((b.min, b.max))
     }
 }

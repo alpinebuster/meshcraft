@@ -14,6 +14,35 @@ The current integrated GPU renderer shows a separate product scene. Return to De
 restores its camera, projection preference and existing viewport drawing policy.
 The live product preview remains independent of the selected image method.
 
+## Retained comparisons and all-shot rendering
+
+The result viewer retains up to eight completed images per document tab, outside
+the design and undo history. `render.compare {left, right}` accepts `"live"` or a
+zero-based retained-result index (oldest first); the sides must differ. It resolves
+indices to job identities so later index shifts cannot retarget an open comparison.
+`render.compare {off:true}` leaves comparison. The shared segments toggle the two
+sources, Swap exchanges them, and the shared divider stays within 5–95%. Both sides
+share image pan/zoom; the live product uses the captured camera and current design.
+Dragging the divider cannot navigate either camera. Copy, export and regrade use
+the compared result on the right (or the left when the right is Live). That selection
+remains stable while new results arrive; evicting a source ends its comparison.
+
+The Output footer's **All shots (n)** runs `render.batch`. The command snapshots up
+to 32 saved shot cameras and names and uses one common image setup. The UI supplies
+the current draft as `request` (the existing `render.start` parameters); a headless
+`render.batch {}` uses the first saved setup in name order. Each queued shot keeps its
+own captured camera while all other options remain the same. Each admission runs
+through `render.start`, one job at a time. No shots, an active render/queue or stale
+geometry refuses without editing the design or history.
+
+`render.status {}` advances an explicitly started queue and returns
+`{queue:{running,waiting,job,shot,error}}`; a status call with a job also includes
+that queue metadata. The UI ticks advance queues in active and background tabs.
+`render.cancel {}` cancels the active batch job and drops all waiting shots; an
+explicit job ID retains the single-job cancellation API. Opening a stage, editor
+or queue readout never starts a batch. The Shots strip reports running and waiting
+counts, and completed shots enter the same retained-result list.
+
 ## Stage bar and floating docks
 
 Render has no ribbon. A shared 88 pt two-row stage bar sits 8 pt to the right of
@@ -331,6 +360,13 @@ Orbit around, zoom to the cursor, the SpaceMouse, the middle double-click, F6 an
 view or navigation cube all work and
 **Fit Product** frames visible product bodies without including sketches or selection.
 
+While Frame shows the picture's frame, **Fit Product** and the fit on entering Render keep
+the product inside that frame rather than the viewport, so a picture taller than wide moves
+the camera back. The fit on entering waits for the saved setup to load, so it frames that
+setup's aspect, not the draft it replaces. `render.camera.fit` takes the picture's `aspect`
+(width over height, 0.000001 to 1000000, default 1) and refuses a fit whose camera would be
+out of range, leaving the current camera as it was.
+
 Preview drafts do not make the document dirty until saved. Unknown backend preferences
 and unsupported modes remain saved intent: the strict resolver reports the unsupported
 viewport request. **Use Integrated Preview** is an explicit draft change, never an
@@ -371,8 +407,16 @@ opaque CPU snapshot path to approximate transparent appearances.
 GPU product batches are separate from Design batches while sharing the installed
 device and pipelines. Model/visibility/appearance changes update the product scene;
 camera movement updates uniforms without rebuilding vertices. Selection and section
-state do not change the product buffers. Vertex uploads are bounded to 128 MiB and
-checked before allocation; malformed/non-finite triangles and invalid opacity fail.
+state do not change the product buffers. On desktop the preview takes up to eight of
+the device's largest buffers of vertex geometry (2 GiB with the usual 256 MiB buffers,
+never more than 2 GiB); uploads are split into buffers within that size. The web keeps
+a 128 MiB budget. The budget is checked before allocation, and a refusal names the
+scene's geometry size, the limit and how to get under it (hide bodies in Design). The
+upload itself runs under its own GPU error scopes: an allocation the device refuses is
+shown in the preview instead of drawing, and nothing else in the app changes how GPU
+errors are handled. Messages sit on a theme panel card so they stay readable on any
+background colour. The separate CPU image job keeps its own memory and work limits.
+Malformed/non-finite triangles and invalid opacity fail.
 Reinstalling the host invalidates product uploads. This is not a general device-loss,
 render-job or cancellation protocol; those ownership mechanisms belong to R4.
 
@@ -455,6 +499,20 @@ that pending request. Hover uses the shared tooltip with the object and look nam
 
 ## Browser scene focus
 
+The existing Camera Inspector page shows a standalone Shot editor when the Browser selection
+is a saved shot. Opening it leaves the live camera and saved design unchanged. Camera fields
+use `render.camera.set`; Update shot saves that camera and Revert restores the saved camera.
+Name, output dimensions and exposure use the existing undoable shot/settings commands.
+Distance is shown as a multiple of the visible subject's bounding-box diagonal (one millimetre
+for an empty scene). The lens chip uses the camera's vertical FOV and a 24 mm sensor height.
+
+Frame's floating panel offers five aspect presets and Custom, plus composition guides.
+Clicking a preset saves its output dimensions in one undo step; Custom preserves dimensions.
+`view.render_frame` independently validates and echoes transient aspect/guide preferences;
+headless calls never edit a design. Guides are per-document UI state, never saved in design JSON.
+The frame and its size/lens chips appear only in Frame or the Shot editor. Product preview,
+navigation and picking use the fitted frame aspect; image jobs and the Result canvas omit guides.
+
 The shared Browser lists Environment (with its source), Lights, saved Shots,
 Objects and Output (with image dimensions and format). Shots **+** opens the
 existing Shots manager; Lights **+**, Solo and Mute remain faded with an explicit
@@ -515,9 +573,13 @@ The stage bar's Check chip and Output's note count open Check. Check now runs th
 read-only `render.preflight` without admitting a job. Notes offer links to their
 owning editor. Copy report and diagnostic JSON use `render.preflight.copy` and the
 platform clipboard queue; headless calls only validate and echo bounded text.
-Named quality presets, EXR export and rendering all shots remain faded with their
-existing reasons. Destination selection uses the completed-image export picker.
+Named quality presets and EXR export remain faded with their existing reasons.
+Destination selection uses the completed-image export picker. The pinned Render
+Image / All shots footer starts the active setup or queues all saved shots through
+`render.batch`; opening the editor never starts a job.
 
 Render and Cancel stay in the stage bar. Active jobs also show a single-row progress
 pill with Cancel. The result viewer retains Copy, export, close, Fit/100% and shared
 pan/zoom. R starts the active setup; Escape closes the image without cancelling its job.
+
+Preferences › Graphics offers “Use previous Render preview geometry budget” (`render_previous_geometry_budget`). It restores the fixed limit (512 MiB on 64-bit desktop, 128 MiB elsewhere); by default, desktop previews use the device-based budget. Changes apply to the next preview frame.

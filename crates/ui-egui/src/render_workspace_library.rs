@@ -66,6 +66,11 @@ struct SourcePreview {
     sha256: String,
     texture: egui::TextureHandle,
 }
+
+#[cfg(test)]
+pub(super) fn clear_preview_texture(app: &mut SolveApp) {
+    app.render_workspace.view.library.preview = None;
+}
 impl std::fmt::Debug for SourcePreview {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SourcePreview").field("id", &self.id).field("sha256", &self.sha256).finish()
@@ -306,9 +311,8 @@ pub(super) fn open_category(app: &mut SolveApp, kind: &str) {
         "quality" | "capabilities" => "output",
         _ => "look",
     };
-    let page = app.render_workspace.view.inspector.page;
     let _ = app.run("view.render_stage", json!({"stage":stage}));
-    app.render_workspace.view.inspector.page = page;
+
     switch_kind(&mut app.render_workspace.view.library, kind);
     let view = &mut app.render_workspace.view.library;
     view.collection = 0;
@@ -321,7 +325,7 @@ pub(super) fn open_category(app: &mut SolveApp, kind: &str) {
     };
     app.ui.show_browser = true;
     let _ = app.run("view.render_browser", json!({"open":true}));
-    app.tree.panel_collapsed = false;
+    app.preferences.browser_collapsed = false;
 }
 pub(super) fn choose(app: &mut SolveApp, view: &mut View, kind: &str, id: &str) -> Result<(), String> {
     switch_kind(view, kind);
@@ -343,14 +347,6 @@ pub(super) fn choose(app: &mut SolveApp, view: &mut View, kind: &str, id: &str) 
     view.labels.insert(key, display);
     view.labels.retain(|key, _| app.preferences.render_library_favorites.contains(key) || app.preferences.render_library_recent.contains(key));
     view.statuses.retain(|key, _| app.preferences.render_library_favorites.contains(key) || app.preferences.render_library_recent.contains(key));
-    app.render_workspace.view.inspector.page = match kind {
-        "native_scenes" | "scenes" | "selene_shots" => super::inspector::Page::Scene,
-        "hdr" | "environments" => super::inspector::Page::Environment,
-        "rigs" | "lighting" => super::inspector::Page::Lighting,
-        "quality" => super::inspector::Page::Output,
-        "capabilities" => super::inspector::Page::Diagnostics,
-        _ => super::inspector::Page::Appearance,
-    };
     Ok(())
 }
 
@@ -531,7 +527,7 @@ pub(super) fn card(app: &mut SolveApp, ui: &mut egui::Ui, bounds: egui::Rect) {
             fill_height: true,
             compact: crate::render_ui::compact(app, bounds.width()),
             editor: false,
-            enabled: stage != super::Stage::Frame,
+            enabled: true,
             header_actions: (stage == super::Stage::Look).then_some(&mut actions as &mut dyn FnMut(&mut egui::Ui)),
         },
         &mut side,
@@ -545,11 +541,8 @@ pub(super) fn card(app: &mut SolveApp, ui: &mut egui::Ui, bounds: egui::Rect) {
                 }
             }),
             super::Stage::Light => light_panel(app, ui),
+            super::Stage::Frame => super::shot::presets(app, ui),
             super::Stage::Output => super::inspector::size_presets(app, ui),
-            super::Stage::Frame => {
-                let reason = app.tr("render.frame_presets_pending");
-                ui_kit::text(ui, reason, ui_kit::Text::Note("render:stage-presets-pending"));
-            }
         },
     );
     let look_tab = usize::from(mode == 2);
@@ -579,7 +572,7 @@ fn stage_title(stage: super::Stage) -> &'static str {
     match stage {
         super::Stage::Look => "render.appearances",
         super::Stage::Light => "render.studios_environments",
-        super::Stage::Frame => "render.frame_presets",
+        super::Stage::Frame => "render.stage_frame",
         super::Stage::Output => "render.size_presets",
     }
 }
@@ -1275,12 +1268,6 @@ pub(super) fn inspect_kinds(app: &mut SolveApp, ui: &mut egui::Ui, kinds: &[&str
     }
 }
 
-pub(super) fn inspect_appearance(app: &mut SolveApp, ui: &mut egui::Ui) {
-    if app.render_workspace.view.library.kind == "appearances" {
-        inspect(app, ui);
-    }
-}
-
 /// Interactive command activation can review the specification selected by S5.
 pub(super) fn review_selected_quality(app: &mut SolveApp) -> Result<(), String> {
     let id = app.render_workspace.view.library.selected.clone().filter(|_| app.render_workspace.view.library.kind == "quality");
@@ -1555,6 +1542,7 @@ pub(super) fn stage_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     let title = app.tr("render.passive_stage").to_string();
     ui_kit::section(ui, "render_passive_stage", &title, false, |ui| stage_content(app, ui));
 }
+#[cfg(test)]
 pub(super) fn stage_content(app: &mut SolveApp, ui: &mut egui::Ui) {
     ui_kit::text(ui, app.tr("render.passive_stage_help"), ui_kit::Text::Note("render.passive_stage_help"));
     let stage = &app.render_workspace.view.draft.stage;
@@ -1698,15 +1686,17 @@ mod studio_browser_tests {
         h.step(&json!({"click":{"handle":format!("render:library:{id}")}})).unwrap();
         h.frames(3);
         assert_eq!(h.app.render_workspace.view.library.selected.as_deref(), Some(id.as_str()));
-        assert_eq!(h.app.render_workspace.view.inspector.page, super::super::inspector::Page::Appearance);
+        assert_eq!(super::super::inspector::selected_editor(&h.app), super::super::inspector::Editor::Scene);
         assert_eq!(h.app.session.doc.to_json(), before, "browsing and selection must not apply appearances");
-        // The selection-following editor takes precedence; library inspection is
-        // available under Advanced when no model target is selected.
+        // Browsing keeps Scene selected until an object is picked.
         h.app.run("select.clear", json!({})).unwrap();
         h.frames(3);
-        h.step(&json!({"click":{"handle":format!("dialog:section:{}", h.app.tr("render.inspector_advanced"))}})).unwrap();
+        // Clearing model selection opens Scene overview; inspect the resource again.
+        h.step(&json!({"click":{"handle":format!("render:library:{id}")}})).unwrap();
         h.frames(3);
-        h.step(&json!({"widget":h.app.tr("render.library_favorite")})).unwrap();
+        assert_eq!(super::super::inspector::selected_editor(&h.app), super::super::inspector::Editor::Scene);
+        let look = h.app.session.doc.appearances.bodies.get("Sample").unwrap().clone();
+        h.app.run("appearance.favorite", json!({"look":look,"favorite":true})).unwrap();
         assert!(h.app.preferences.render_library_favorites.contains(&("appearances".into(), id.clone())));
         h.step(&json!({"click":{"handle":"render:library-list"}})).unwrap();
         h.frames(3);
@@ -1717,15 +1707,15 @@ mod studio_browser_tests {
         assert_eq!(h.app.session.doc.to_json(), before);
         let catalog = h.app.run("appearance.library", json!({})).unwrap();
         let blue = catalog["appearances"].as_array().unwrap().iter().find(|entry| entry["name"] == "ABS - Blue").unwrap();
-        let mut view = std::mem::take(&mut h.app.render_workspace.view.library);
-        choose(&mut h.app, &mut view, "appearances", &appearance_id(blue)).unwrap();
-        refresh_targets(&mut h.app, &mut view).unwrap();
-        view.target = view.targets.first().cloned();
-        h.app.render_workspace.view.library = view;
+        h.app.run("select.set", json!({"items":[solidcraft_engine::Sel::Body { name: "Sample".into() }]})).unwrap();
+        h.app.render_workspace.view.library.collection = 0;
+        h.app.render_workspace.view.library.loaded = false;
         h.frames(3);
         assert_eq!(h.app.session.doc.to_json(), before);
-        h.step(&json!({"widget":h.app.tr("render.library_apply_appearance")})).unwrap();
+        let undo = h.app.session.undo.len();
+        h.step(&json!({"click":{"handle":format!("render:library:{}", appearance_id(blue))}})).unwrap();
         assert_eq!(h.app.session.doc.appearances.bodies.get("Sample").unwrap().name, "ABS - Blue");
+        assert_eq!(h.app.session.undo.len(), undo + 1);
         if let Some(dir) = std::env::var_os("SOLIDCRAFT_LIBRARY_EVIDENCE") {
             std::fs::create_dir_all(&dir).unwrap();
             h.app.run("appearance.assign", json!({"bodies":["Sample"],"appearance":"Aluminum - Anodized Blue"})).unwrap();
@@ -1804,7 +1794,7 @@ mod studio_browser_tests {
         for (stage, key) in [
             ("look", "render.appearances"),
             ("light", "render.studios_environments"),
-            ("frame", "render.frame_presets"),
+            ("frame", "render.stage_frame"),
             ("output", "render.size_presets"),
         ] {
             h.app.run("view.render_stage", json!({"stage":stage})).unwrap();
@@ -2031,9 +2021,9 @@ mod studio_browser_tests {
         assert!(h.app.session.undo.is_empty());
         choose(&mut h.app, &mut view, "surfaces", "SURF-048").unwrap();
         assert_eq!(h.app.preferences.render_library_recent.len(), 32);
-        assert_eq!(h.app.render_workspace.view.inspector.page, super::super::inspector::Page::Appearance);
+        assert_eq!(super::super::inspector::selected_editor(&h.app), super::super::inspector::Editor::Scene);
         choose(&mut h.app, &mut view, "native_scenes", "NATIVE-STUDIO-002").unwrap();
-        assert_eq!(h.app.render_workspace.view.inspector.page, super::super::inspector::Page::Scene);
+        assert_eq!(super::super::inspector::selected_editor(&h.app), super::super::inspector::Editor::Scene);
         assert_eq!(h.app.session.doc.to_json(), before);
     }
 }
