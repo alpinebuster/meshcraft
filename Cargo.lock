@@ -4233,7 +4233,6 @@ name = "solidcraft-kernel"
 version = "0.40.0-rc.1"
 dependencies = [
  "log",
- "meshlib",
  "proptest",
  "rayon",
  "serde",
@@ -4263,6 +4262,17 @@ version = "0.40.0-rc.1"
 dependencies = [
  "serde_json",
  "web-time",
+]
+
+[[package]]
+name = "solidcraft-mesh"
+version = "0.29.0"
+dependencies = [
+ "meshlib",
+ "serde",
+ "serde_json",
+ "solidcraft-geom",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
