@@ -8,7 +8,7 @@ use crate::sheet;
 use solidcore_record::{Loop2, Seg2};
 use solidcraft_geom::{Aabb3, Ring};
 
-pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut ModelState) -> Result<()> {
+pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st: &mut ModelState, warning: &mut Option<String>) -> Result<()> {
     match &f.kind {
         FeatureKind::Emboss { sketch, profiles, depth, deboss, targets, face } => {
             let ss = st.sketch(sketch.0).ok_or_else(|| DocError::Unknown(format!("sketch {sketch}")))?;
@@ -59,7 +59,20 @@ pub(super) fn eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, 
             if st.bodies.is_empty() {
                 return Err(DocError::Invalid("there is no body to emboss".into()));
             }
-            apply_op(doc, st, f, tools, if *deboss { Operation::Cut } else { Operation::Join }, &crate::plain(targets))
+            // #10940: an emboss or deboss whose tool lies clear of the body (a sketch on the far
+            // side of the material, a depth that stops short) used to report success and change
+            // nothing. Say so: the body is compared before and after, as the command's reply does.
+            let before: Vec<Body> = st.bodies.iter().map(|b| b.body.clone()).collect();
+            apply_op(doc, st, f, tools, if *deboss { Operation::Cut } else { Operation::Join }, &crate::plain(targets))?;
+            let unchanged = st.bodies.len() == before.len() && st.bodies.iter().zip(&before).all(|(b, old)| old.same(&b.body));
+            if unchanged {
+                let what = if *deboss { "deboss" } else { "emboss" };
+                append_warning(
+                    warning,
+                    format!("the {what} changed nothing; check where its profile lies, which side of the face the sketch is on, and the depth"),
+                );
+            }
+            Ok(())
         }
         FeatureKind::Rib { .. } => {
             let tools = rib_tools(vals, st, f, None)?;
@@ -2318,11 +2331,16 @@ pub(super) fn plastic_eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &F
                 _ => false,
             };
             let (Some(_), Some(_), false) = (outer, openings.first(), alike) else {
+                // A solid box top has no opening: Shell that face first, then pick the rim
+                // around the cavity (#10437).
                 let what = match (loops.len(), openings.len()) {
-                    (0 | 1, _) => "pick the rim face of a shelled body (a face with an inner and an outer edge)".to_string(),
-                    (_, 0) => "pick the rim face of a shelled body: this face's inner edges are where other features stand on it, not an opening"
+                    (0 | 1, _) => "Lip needs the rim of a shelled body: Shell a face open first, then pick the rim around that opening (a face with an outer edge and an inner hole)"
                         .to_string(),
-                    (_, k) => format!("pick the rim face of a shelled body (round one opening): this face has {k} openings alike in size"),
+                    (_, 0) => "Lip needs a rim around an opening: this face's inner edges are where other features stand on it, not a shell cavity. Shell a face open, then pick that rim"
+                        .to_string(),
+                    (_, k) => format!(
+                        "Lip needs one clear opening as the rim: this face has {k} openings alike in size (for example a plate of holes). Shell one cavity, or pick a rim that rings a single opening"
+                    ),
                 };
                 return Err(DocError::Invalid(what));
             };
