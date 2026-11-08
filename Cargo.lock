@@ -4285,7 +4285,7 @@ dependencies = [
 
 [[package]]
 name = "solidcraft-mesh"
-version = "0.40.0-rc.2"
+version = "0.40.0-rc.3"
 dependencies = [
  "meshlib",
  "serde",
