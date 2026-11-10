@@ -217,7 +217,7 @@ fn sketch_modify_previews_use_the_active_occurrences_world_placement() {
         .run("occurrence.move", json!({"occurrence":part["occurrence"],"translate":[100,30,20],"axis":[0,0,1],"angle":"35 deg","capture":false}))
         .unwrap();
     let original = h.app.session.doc.to_json();
-    let colors = crate::preview::Colors::from_tokens(&crate::theme::Tokens::get());
+    let colors = crate::preview::Colors::from_tokens(&solidcraft_theme::Tokens::get());
     for (command, params) in [
         ("sketch.mirror", json!({"entities":["l1"],"line":"l2"})),
         ("sketch.pattern.rectangular", json!({"entities":["l1"],"count":3,"spacing":10})),
@@ -547,6 +547,46 @@ fn a_rectangle_corner_lines_up_with_two_points_at_once_and_keeps_both() {
         let (_, start) = point_and_alignments(&h, [30.0, 0.0]).expect("the first corner lines up with the bottom");
         assert!(start.iter().any(|(kind, _)| *kind == "Horizontal"), "{start:?}");
         assert_eq!(h.app.session.undo.len(), undo + 1, "the alignments are in the rectangle's undo step");
+    }
+}
+
+/// #13413: a point placed on the dotted guide from a line's midpoint stays plumb with that
+/// midpoint, through a Midpoint point on the line, in the point's one undo step. With the
+/// preference off, the guide only places the point, as before.
+#[test]
+fn a_point_on_a_midpoint_guide_stays_lined_up_with_the_midpoint() {
+    use solidcraft_engine::sketch::ConstraintKind::{Midpoint, VerticalPoints};
+    for aligning in [true, false] {
+        let mut h = lining_up_fixture(&[("sketch.line", json!({"points":[[10.37,5.21],[30.37,5.21]],"infer":false}))]);
+        h.app.preferences.sketch_align_points = aligning;
+        h.app.preferences.sketch_tracking_guides = true;
+        let undo = h.app.session.undo.len();
+        step(&mut h, json!({"start":"sketch.point"}));
+        step(&mut h, json!({"move":{"sketch":[20.37,5.21]}}));
+        step(&mut h, json!({"move":{"sketch":[20.2,30.4]}}));
+        assert!(h.app.viewport.tracking.guide.is_some(), "the midpoint's guide is showing");
+        step(&mut h, json!({"click":{"sketch":[20.2,30.4]}}));
+        let st = crate::open_meshing::session_world(&h.app.session);
+        let sk = &st.sketch(h.app.session.active_sketch.unwrap()).unwrap().sketch;
+        let placed = sk.points.iter().position(|p| p.pos.y > 25.0).expect("the point is placed");
+        let plumb: Vec<usize> = sk
+            .constraints
+            .iter()
+            .filter_map(|c| match c.kind {
+                VerticalPoints { p, q } if p == placed => Some(q),
+                VerticalPoints { p, q } if q == placed => Some(p),
+                _ => None,
+            })
+            .collect();
+        if !aligning {
+            assert!(plumb.is_empty(), "off: no constraint, {plumb:?}");
+            continue;
+        }
+        assert!((sk.points[placed].pos.x - 20.37).abs() < 1e-6, "on the midpoint's guide: {:?}", sk.points[placed].pos);
+        assert_eq!(plumb.len(), 1, "one Vertical constraint");
+        assert!(sk.constraints.iter().any(|c| matches!(c.kind, Midpoint { p, .. } if p == plumb[0])), "it ties to the line's midpoint");
+        drop(st);
+        assert_eq!(h.app.session.undo.len(), undo + 1, "the constraint is in the point's undo step");
     }
 }
 

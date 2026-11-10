@@ -1,17 +1,17 @@
 //! Compact navigation preference compositions and explanatory figures.
 pub(crate) use super::preferences_figure_data::{paint_orbit_centre, paint_orbit_cursor, paint_orbit_origin};
-pub(crate) use super::preferences_figure_ops::{paint_navigation_axes, paint_navigation_cube, paint_navigation_custom};
+pub(crate) use super::preferences_figure_ops::{NavigatorAxis, paint_navigation_axes, paint_navigation_cube, paint_navigation_custom};
 use super::{metrics::dimension, text::paint_text};
-use crate::theme::Tokens;
 use crate::ui_kit::BackingTooltipExt as _;
 use egui::{FontId, Rect, Sense, Stroke, Ui, pos2, vec2};
+use solidcraft_theme::Tokens;
 
 /// One mouse silhouette beside the actual mapping selector and binding legend.
 /// The figure is descriptive content, not an icon asset or an application viewport.
 pub(crate) fn settings_mouse_mapping(ui: &mut Ui, bindings: &[(Vec<String>, String)], mapping: impl FnOnce(&mut Ui)) {
     let keys: Vec<Vec<&str>> = bindings.iter().map(|(keys, _)| keys.iter().map(String::as_str).collect()).collect();
     let rows: Vec<(&[&str], &str)> = bindings.iter().zip(&keys).map(|((_, action), keys)| (keys.as_slice(), action.as_str())).collect();
-    if crate::prefs_search::suppress_chrome(ui) {
+    if super::settings_search::suppress_chrome(ui) {
         mapping(ui);
         super::settings_bindings(ui, &rows);
         return;
@@ -58,28 +58,37 @@ fn axis_columns(rect: Rect) -> [Rect; 5] {
     })
 }
 
-pub(crate) fn settings_axis_header(ui: &mut Ui) {
-    if crate::prefs_search::suppress_chrome(ui) {
+/// The host's column names for the axis table ([`settings_axis_header`], [`settings_axis_row`]).
+pub(crate) struct AxisColumns<'a> {
+    pub axis: &'a str,
+    pub live_input: &'a str,
+    pub speed: &'a str,
+    pub source: &'a str,
+}
+
+pub(crate) fn settings_axis_header(ui: &mut Ui, columns: &AxisColumns<'_>) {
+    if super::settings_search::suppress_chrome(ui) {
         return;
     }
     let t = Tokens::get();
     let (rect, _) = ui.allocate_exact_size(vec2(dimension(ui.available_width()), t.space_24), Sense::hover());
     if rect.width() < t.form_label_width * 5.0 + t.space_24 * 5.0 {
         let half = rect.width() * 0.5;
-        for (index, label) in ["prefs.axis", "prefs.live_input"].into_iter().enumerate() {
+        for (index, label) in [columns.axis, columns.live_input].into_iter().enumerate() {
             let cell = Rect::from_min_size(rect.min + vec2(half * index as f32, 0.0), vec2(half, rect.height()));
-            paint_text(ui, cell, &crate::i18n::tr(label).to_uppercase(), crate::fonts::semibold(t.font_small), t.form_dim, false);
+            paint_text(ui, cell, &label.to_uppercase(), crate::ui_kit::type_face::semibold(t.font_small), t.form_dim, false);
         }
         return;
     }
-    for (column, label) in axis_columns(rect).into_iter().zip(["prefs.axis", "prefs.live_input", "", "prefs.speed", "prefs.source"]) {
-        paint_text(ui, column, &crate::i18n::tr(label).to_uppercase(), crate::fonts::semibold(t.font_small), t.form_dim, false);
+    for (column, label) in axis_columns(rect).into_iter().zip([columns.axis, columns.live_input, "", columns.speed, columns.source]) {
+        paint_text(ui, column, &label.to_uppercase(), crate::ui_kit::type_face::semibold(t.font_small), t.form_dim, false);
     }
 }
 
 /// One table row combines measured input with the actual invert, gain, and motion controls.
 pub(crate) fn settings_axis_row(
     ui: &mut Ui,
+    columns: &AxisColumns<'_>,
     name: &str,
     value: f32,
     dead_zone: [f32; 2],
@@ -96,7 +105,7 @@ pub(crate) fn settings_axis_row(
         super::layout::sized_row(ui, name, height, |ui| {
             // The row already owns these bounds; its centered cursor is not the top edge.
             let rect = ui.max_rect();
-            crate::scenario::publish_rect(&format!("prefs:axis:{name}"), rect);
+            solidcraft_ui_registry::publish_rect(&format!("prefs:axis:{name}"), rect);
             t.secondary_hline(ui.painter(), rect.x_range(), rect.bottom(), t.dialog_rule);
             if narrow {
                 let label_rect = Rect::from_min_size(rect.min, vec2(rect.width() * 0.5, line));
@@ -107,13 +116,12 @@ pub(crate) fn settings_axis_row(
                 live_axis_bar_in(ui, live_rect, value, dead_zone);
                 let cell = |index: f32| Rect::from_min_size(pos2(rect.left(), rect.top() + (line + t.space_8) * index), vec2(rect.width(), line));
                 axis_control(ui, cell(1.0), "invert", name, invert);
-                let label_width = super::ContentWidth::label(ui, crate::i18n::tr("prefs.speed"))
-                    .max(super::ContentWidth::label(ui, crate::i18n::tr("prefs.source")));
+                let label_width = super::ContentWidth::label(ui, columns.speed).max(super::ContentWidth::label(ui, columns.source));
                 axis_control(ui, cell(2.0), "speed", name, |ui| {
-                    super::settings_form(ui, label_width, |ui| super::row(ui, crate::i18n::tr("prefs.speed"), speed));
+                    super::settings_form(ui, label_width, |ui| super::row(ui, columns.speed, speed));
                 });
                 axis_control(ui, cell(3.0), "source", name, |ui| {
-                    super::settings_form(ui, label_width, |ui| super::row(ui, crate::i18n::tr("prefs.source"), source));
+                    super::settings_form(ui, label_width, |ui| super::row(ui, columns.source, source));
                 });
             } else {
                 let [label_rect, live_rect, invert_rect, speed_rect, source_rect] = axis_columns(rect);
@@ -173,11 +181,10 @@ pub(crate) fn live_axis_bar_in(ui: &Ui, live_rect: Rect, value: f32, dead_zone: 
 
 /// Compact per-axis gain uses a consistent two-decimal specimen and the real accepted range.
 pub(crate) fn settings_axis_gain(ui: &mut Ui, gain: &mut f32) -> egui::Response {
-    if crate::prefs_search::querying(ui) && (!ui.is_visible() || crate::prefs_search::suppress_chrome(ui)) {
-        return crate::prefs_search::hidden_response(ui);
+    if super::settings_search::querying(ui) && (!ui.is_visible() || super::settings_search::suppress_chrome(ui)) {
+        return super::settings_search::hidden_response(ui);
     }
-    let response =
-        ui.add(egui::DragValue::new(gain).range(0.0..=3.0).speed(0.05).suffix("×").fixed_decimals(2).custom_parser(crate::prefs::parse_number));
+    let response = ui.add(egui::DragValue::new(gain).range(0.0..=3.0).speed(0.05).suffix("×").fixed_decimals(2).custom_parser(super::parse_number));
     response.widget_info(|| {
         let mut info = egui::WidgetInfo::drag_value(ui.is_enabled(), f64::from(*gain));
         info.label = Some(super::layout::label(ui).to_owned());

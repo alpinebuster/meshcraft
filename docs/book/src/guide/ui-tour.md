@@ -42,8 +42,10 @@ view.
   row's right end shows or hides an item (**Preferences › Interface › Eye next to the fold arrow**
   puts it back beside the fold arrow; press an eye and drag up or down over other eyes to show or hide them all at once, as one undo step), a component's radio button makes it the active component,
   and right-clicking any row gives that item's menu. Right-click the design or a component and choose
-  **Organize → Expand All** or **Collapse All** to open or close every folder under that row (the design row stays visible
-  when the whole tree is collapsed). Components start closed, so a large assembly opens as a
+  **Organize → Collapse All** to close every component, folder and group in the whole tree, at
+  every level (the design row stays open, so its first level stays listed). On the design,
+  **Organize → Expand All** opens everything; on a component, **Expand Below** and **Collapse
+  Below** open or close only the rows under it. Components start closed, so a large assembly opens as a
   short list; open one with its fold arrow, or use **Find in Browser** on a body to open the rows
   down to it (**Preferences › Interface › Components start open** opens every component from the
   start, as before). **Preferences › Layout › Browser rows start closed** (off by default) starts
@@ -85,6 +87,9 @@ view.
   in the default and Inventor presets. In every preset, Ctrl+left drag (Cmd on macOS) that starts
   on empty space orbits; a Ctrl+click still adds to the selection. Shift+right-drag snaps to the nearest standard or
   diagonal view; Shift does not request snapping when the preset already requires it to orbit.
+  An orbit drag that reaches the edge of the view carries on: the cursor reappears at the opposite
+  edge, so you can keep turning round the model without letting go (not on Wayland or in the browser).
+  **Preferences › Navigation › Wrap the cursor while orbiting** turns this off.
 
   Enable **Preferences → Navigation → Free orbit** to rotate the mouse and 3D mouse continuously
   through both poles, preserving roll. During an orbit drag, Shift snaps the view direction and

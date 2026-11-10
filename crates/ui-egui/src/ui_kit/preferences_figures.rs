@@ -1,8 +1,8 @@
 //! Deliberately composed preference illustrations. A shared orthographic projection keeps
 //! faces, ground contact, rotation cues and axes consistent at their small display size.
-use crate::theme::Tokens;
 use crate::ui_kit::BackingTooltipExt as _;
 use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, Vec2, vec2};
+use solidcraft_theme::Tokens;
 
 struct Canvas {
     rect: Rect,
@@ -151,8 +151,8 @@ pub(crate) fn paint_orientation(p: &Painter, rect: Rect, y_up: bool) {
         p.line_segment([centre, end], Stroke::new(c.width(4.2), t.viewport_top));
         arrow(&p, centre, end, colour, c.width(2.3), c.width(6.5));
         let text_pos = if y < 20.0 { c.at(x, y - 6.0) } else { c.at(x + if x < 60.0 { -7.0 } else { 7.0 }, y + 3.0) };
-        let ink = if crate::theme::contrast_ratio(colour, t.viewport_top) >= 4.5 { colour } else { t.form_ink };
-        p.text(text_pos, egui::Align2::CENTER_CENTER, label, crate::fonts::semibold(t.font_small), ink);
+        let ink = if solidcraft_theme::contrast_ratio(colour, t.viewport_top) >= 4.5 { colour } else { t.form_ink };
+        p.text(text_pos, egui::Align2::CENTER_CENTER, label, crate::ui_kit::type_face::semibold(t.font_small), ink);
     }
     p.circle_filled(centre, c.width(2.7), t.form_ink);
     p.circle_filled(centre, c.width(1.2), t.viewport_top);
@@ -187,7 +187,7 @@ pub(crate) fn paint_contact_shading(p: &Painter, rect: Rect, on: bool) {
 /// It is explanatory vector content: no second viewport, live scene, or nested host.
 /// A restrained workspace schematic: panel placement remains primary, with a few
 /// tool marks, tree rows and one simple solid providing recognisable CAD context.
-pub(crate) fn paint_layout(ui: &mut egui::Ui, state: super::preferences::LayoutPreview) {
+pub(crate) fn paint_layout(ui: &mut egui::Ui, state: super::preferences::LayoutPreview, note: &str) {
     let t = Tokens::get();
     let width = super::metrics::dimension(ui.available_width());
     let size = vec2(width, width * 148.0 / 226.0);
@@ -220,7 +220,7 @@ pub(crate) fn paint_layout(ui: &mut egui::Ui, state: super::preferences::LayoutP
             p.with_clip_rect(rect.intersect(p.clip_rect())).text(
                 centre,
                 egui::Align2::CENTER_CENTER,
-                crate::i18n::tr_label(label),
+                solidcraft_ui_text::tr_label(label),
                 egui::FontId::proportional(t.font_small),
                 t.form_dim,
             );
@@ -230,7 +230,7 @@ pub(crate) fn paint_layout(ui: &mut egui::Ui, state: super::preferences::LayoutP
     panel(inset, inset, 120.0 - inset * 2.0, ribbon_height, "", t.toolbar);
     let browser =
         panel(bx, top, bw, browser_height, "Browser", if state.translucent && !state.compact { t.panel.gamma_multiply(0.60) } else { t.panel });
-    crate::scenario::publish_rect("prefs:layout_preview:browser", browser);
+    solidcraft_ui_registry::publish_rect("prefs:layout_preview:browser", browser);
     // A full row of quiet tool symbols, with label marks only when labels are enabled.
     let quiet = t.form_dim.lerp_to_gamma(t.viewport_top, 0.55);
     for index in 0..10 {
@@ -251,7 +251,7 @@ pub(crate) fn paint_layout(ui: &mut egui::Ui, state: super::preferences::LayoutP
     let viewport_left = bx + bw + gap;
     let viewport_bottom = if state.history == 0 { bottom - 10.0 - gap } else { bottom };
     let object_centre = c.at((viewport_left + 120.0 - inset) * 0.5, (top + viewport_bottom) * 0.5);
-    crate::icons::glyphs::brand_mark_silhouette(&p, object_centre, c.width(22.0), quiet);
+    crate::ui_kit::icons::glyphs::brand_mark_silhouette(&p, object_centre, c.width(22.0), quiet);
     p.circle_filled(c.at(110.0 - inset, top + 7.0), c.width(3.5), quiet);
     let history = match state.history {
         1 => Some(panel(inset, top, 10.0, bottom - top, "", t.selected_bg)),
@@ -261,7 +261,7 @@ pub(crate) fn paint_layout(ui: &mut egui::Ui, state: super::preferences::LayoutP
         _ => Some(panel(inset, bottom - 10.0, 120.0 - inset * 2.0, 10.0, "History", t.selected_bg)),
     };
     if let Some(history) = history {
-        crate::scenario::publish_rect("prefs:layout_preview:history", history);
+        solidcraft_ui_registry::publish_rect("prefs:layout_preview:history", history);
     }
     if let Some(history) = history.filter(|_| state.history == 1) {
         // A single vertical mark reads as the narrow icon-only history rail.
@@ -279,10 +279,9 @@ pub(crate) fn paint_layout(ui: &mut egui::Ui, state: super::preferences::LayoutP
         (120.0 - inset - bw, top, (viewport_bottom - top) * 0.65)
     };
     let dialog = panel(dialog_x, dialog_top, bw, dialog_height, "Dialogs", t.dialog_footer);
-    crate::scenario::publish_rect("prefs:layout_preview:dialog", dialog);
-    crate::scenario::publish_rect("prefs:layout_preview", outer);
-    ui.interact(outer, ui.make_persistent_id("layout_preview_help"), egui::Sense::hover())
-        .backing_on_hover_text(crate::i18n::tr("prefs.layout_note"));
+    solidcraft_ui_registry::publish_rect("prefs:layout_preview:dialog", dialog);
+    solidcraft_ui_registry::publish_rect("prefs:layout_preview", outer);
+    ui.interact(outer, ui.make_persistent_id("layout_preview_help"), egui::Sense::hover()).backing_on_hover_text(note);
 }
 
 #[allow(unused_imports, reason = "painted by the Preferences pages of #9875 to #9883")]
@@ -308,16 +307,17 @@ mod tests {
     #[test]
     fn live_layout_preview_follows_each_choice_in_both_themes() {
         use crate::ui_kit::LayoutPreview;
-        let previous = crate::theme::is_dark();
+        let previous = solidcraft_theme::is_dark();
         let baseline = LayoutPreview { compact: false, labels: true, history: 0, translucent: false, dialog_left: false };
         for dark in [false, true] {
-            crate::theme::set_dark(dark);
+            solidcraft_theme::set_dark(dark);
             let draw = |state| {
-                let ctx = crate::fonts::test_context();
-                let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let ctx = crate::ui_kit::test_support::context();
+                let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
                     ui.set_width(262.0);
-                    super::paint_layout(ui, state);
+                    super::paint_layout(ui, state, "Where the panels go");
                 });
+                output.textures_delta.clear();
                 format!("{:?}", output.shapes)
             };
             let original = draw(baseline);
@@ -333,13 +333,13 @@ mod tests {
                 assert_ne!(original, draw(state), "each actual choice changes the schematic");
             }
             let _ = draw(LayoutPreview { compact: false, labels: false, history: 2, translucent: true, dialog_left: true });
-            let browser = crate::scenario::rect_of("prefs:layout_preview:browser").unwrap();
-            let history = crate::scenario::rect_of("prefs:layout_preview:history").unwrap();
-            let dialog = crate::scenario::rect_of("prefs:layout_preview:dialog").unwrap();
+            let browser = solidcraft_ui_registry::rect_of("prefs:layout_preview:browser").unwrap();
+            let history = solidcraft_ui_registry::rect_of("prefs:layout_preview:history").unwrap();
+            let dialog = solidcraft_ui_registry::rect_of("prefs:layout_preview:dialog").unwrap();
             assert!(browser.contains_rect(dialog), "the left-column dialog remains inside the Browser region");
             assert!(!dialog.intersects(history), "the dialog cannot cover the Under browser History caption");
         }
-        crate::theme::set_dark(previous);
+        solidcraft_theme::set_dark(previous);
     }
 
     /// Both orientation figures draw right-handed axes (#5680): seen from above, the turn from X
@@ -361,13 +361,13 @@ mod tests {
     }
 
     use super::{ThemeSample, paint_theme_thumbnail, paint_theme_thumbnail_rounded};
-    use crate::theme::Tokens;
     use crate::ui_kit::preferences_figure_data::FIGURES;
     use egui::{Pos2, Rect, vec2};
+    use solidcraft_theme::Tokens;
 
     /// Shapes a figure paints into `rect` on a fresh frame, in the given theme.
     fn shapes(rect: Rect, paint: impl Fn(&egui::Painter, Rect)) -> Vec<egui::epaint::ClippedShape> {
-        let ctx = crate::fonts::test_context();
+        let ctx = crate::ui_kit::test_support::context();
         let mut output =
             ctx.run_ui(egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0))), ..Default::default() }, |ui| {
                 paint(ui.painter(), rect);
@@ -403,7 +403,7 @@ mod tests {
                 let centre_rect = rect.shrink(radius);
                 let mut vertices = 0;
                 for clipped in shapes(rect, |p, r| paint_theme_thumbnail_rounded(p, r, &sample, radius)) {
-                    crate::test_support::each_shape(&clipped.shape, &mut |shape| {
+                    crate::ui_kit::test_support::each_shape(&clipped.shape, &mut |shape| {
                         if let egui::Shape::Mesh(mesh) = shape {
                             for vertex in &mesh.vertices {
                                 let nearest = Pos2::new(
@@ -425,9 +425,9 @@ mod tests {
     /// panicking, and at a normal size stays inside its rectangle with a bounded number of shapes.
     #[test]
     fn every_preference_figure_paints_safely_at_any_size_in_both_themes() {
-        let previous = crate::theme::is_dark();
+        let previous = solidcraft_theme::is_dark();
         for dark in [false, true] {
-            crate::theme::set_dark(dark);
+            solidcraft_theme::set_dark(dark);
             assert!(!FIGURES.is_empty());
             for (name, size, paint) in FIGURES {
                 for rect in rects() {
@@ -444,16 +444,16 @@ mod tests {
                 }
             }
         }
-        crate::theme::set_dark(previous);
+        solidcraft_theme::set_dark(previous);
     }
 
     /// The figures read the theme: the same figure paints different colours in light and dark.
     #[test]
     fn preference_figures_follow_the_theme() {
-        let previous = crate::theme::is_dark();
+        let previous = solidcraft_theme::is_dark();
         let rect = Rect::from_min_size(Pos2::ZERO, vec2(120.0, 64.0));
         let colours = |dark: bool| {
-            crate::theme::set_dark(dark);
+            solidcraft_theme::set_dark(dark);
             let mut all = Vec::new();
             for shape in shapes(rect, super::super::preferences_figure_data::paint_orbit_origin) {
                 if let egui::Shape::Rect(r) = shape.shape {
@@ -464,7 +464,7 @@ mod tests {
         };
         let (light, dark) = (colours(false), colours(true));
         assert!(!light.is_empty() && light != dark);
-        crate::theme::set_dark(previous);
+        solidcraft_theme::set_dark(previous);
     }
 
     #[test]

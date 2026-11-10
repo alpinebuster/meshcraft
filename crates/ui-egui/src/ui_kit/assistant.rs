@@ -1,8 +1,8 @@
 //! Assistant presentation primitives; protocol state and action dispatch stay with callers.
-use crate::theme::Tokens;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::ui_kit::BackingTooltipExt as _;
 use egui::{InnerResponse, Response, Ui, vec2};
+use solidcraft_theme::Tokens;
 
 #[derive(Clone, Copy)]
 pub(crate) enum AssistantTone {
@@ -34,7 +34,7 @@ pub(crate) fn assistant_badge(ui: &mut Ui, label: &str, tone: AssistantTone) -> 
 
 /// A compact informational chip in the active workspace colours.
 pub(crate) fn workspace_chip(ui: &mut Ui, label: &str) -> Response {
-    let accent = crate::theme::TabAccent::current(ui.ctx());
+    let accent = solidcraft_theme::TabAccent::current(ui.ctx());
     badge(ui, label, accent.ink, accent.soft)
 }
 
@@ -160,7 +160,7 @@ pub(crate) fn assistant_tool_status(ui: &mut Ui, state: AssistantToolState) -> R
         }
         AssistantToolState::Failed => {
             ui.painter().circle_filled(rect.center(), size / 2.0, t.form_error_fill);
-            crate::icons::paint_ink(ui.painter(), rect, "close", t.form_error);
+            crate::ui_kit::icons::paint_ink(ui.painter(), rect, "close", t.form_error);
         }
     }
     response
@@ -231,8 +231,11 @@ pub(crate) fn assistant_approval<R>(ui: &mut Ui, title: &str, body: impl FnOnce(
                     ui.horizontal_top(|ui| {
                         ui.spacing_mut().item_spacing.x = t.space_6;
                         let (icon, _) = ui.allocate_exact_size(vec2(t.space_16, t.space_16), egui::Sense::hover());
-                        crate::icons::paint_ink(ui.painter(), icon, "shield", t.selected_ink);
-                        ui.add(egui::Label::new(egui::RichText::new(title).font(crate::fonts::semibold(t.font_label)).color(t.form_ink)).wrap());
+                        crate::ui_kit::icons::paint_ink(ui.painter(), icon, "shield", t.selected_ink);
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(title).font(crate::ui_kit::type_face::semibold(t.font_label)).color(t.form_ink))
+                                .wrap(),
+                        );
                     });
                 },
             );
@@ -245,7 +248,7 @@ pub(crate) fn assistant_approval<R>(ui: &mut Ui, title: &str, body: impl FnOnce(
                 .inner
         },
     );
-    crate::scenario::publish_rect("assistant:approval", output.response.rect);
+    solidcraft_ui_registry::publish_rect("assistant:approval", output.response.rect);
     output
 }
 
@@ -331,8 +334,8 @@ pub(crate) fn assistant_send(ui: &mut Ui, enabled: bool, busy: bool, label: &str
         let (rect, response) = ui.allocate_exact_size(vec2(size, size), egui::Sense::click());
         let fill = if response.hovered() { t.form_primary.gamma_multiply(0.9) } else { t.form_primary };
         ui.painter().circle_filled(rect.center(), size / 2.0, fill);
-        let ink = if crate::theme::contrast_ratio(t.on_accent, fill) >= 4.5 { t.on_accent } else { t.tab_on_fill_dark };
-        crate::icons::paint_ink(ui.painter(), rect.shrink(t.space_6), if busy { "stop" } else { "send" }, ink);
+        let ink = if solidcraft_theme::contrast_ratio(t.on_accent, fill) >= 4.5 { t.on_accent } else { t.tab_on_fill_dark };
+        crate::ui_kit::icons::paint_ink(ui.painter(), rect.shrink(t.space_6), if busy { "stop" } else { "send" }, ink);
         if response.has_focus() {
             ui.painter().circle_stroke(rect.center(), size / 2.0 + t.space_2, egui::Stroke::new(1.0, t.form_primary));
         }
@@ -374,8 +377,10 @@ pub(crate) fn assistant_empty<R>(ui: &mut Ui, title: &str, body: &str, add: impl
         let diameter = t.control_height + t.space_16;
         let (disc, _) = ui.allocate_exact_size(vec2(diameter, diameter), egui::Sense::hover());
         ui.painter().circle_filled(disc.center(), diameter / 2.0, t.accent_soft);
-        crate::icons::paint_ink(ui.painter(), disc.shrink(t.space_8), "assistant", t.selected_ink);
-        ui.add(egui::Label::new(egui::RichText::new(title).font(crate::fonts::semibold(t.font_body + t.space_2)).color(t.form_ink)).wrap());
+        crate::ui_kit::icons::paint_ink(ui.painter(), disc.shrink(t.space_8), "assistant", t.selected_ink);
+        ui.add(
+            egui::Label::new(egui::RichText::new(title).font(crate::ui_kit::type_face::semibold(t.font_body + t.space_2)).color(t.form_ink)).wrap(),
+        );
         ui.add(egui::Label::new(egui::RichText::new(body).size(t.font_label).color(t.form_dim)).wrap());
         add(ui)
     })
@@ -410,7 +415,7 @@ mod tests {
     #[test]
     fn assistant_bubble_stays_right_aligned_at_narrow_and_wide_widths() {
         for width in [220.0, 280.0, 440.0, 740.0] {
-            let ctx = crate::fonts::test_context();
+            let ctx = crate::ui_kit::test_support::context();
             for _ in 0..2 {
                 super::super::test_support::frame(&ctx, vec![], |ui| {
                     ui.set_width(width);
@@ -429,7 +434,7 @@ mod tests {
     #[test]
     fn assistant_bubble_stacks_message_and_file_summary_without_squeezing_either() {
         for width in [280.0, 440.0, 740.0] {
-            let ctx = crate::fonts::test_context();
+            let ctx = crate::ui_kit::test_support::context();
             for _ in 0..2 {
                 super::super::test_support::frame(&ctx, vec![], |ui| {
                     ui.set_width(width);
@@ -451,7 +456,7 @@ mod tests {
     #[test]
     fn assistant_send_only_activates_when_enabled() {
         for enabled in [false, true] {
-            let ctx = crate::fonts::test_context();
+            let ctx = crate::ui_kit::test_support::context();
             let mut position = egui::Pos2::ZERO;
             let mut clicked = false;
             super::super::test_support::frame(&ctx, vec![], |ui| {
@@ -469,7 +474,7 @@ mod tests {
 
     #[test]
     fn assistant_header_and_badge_share_reference_control_heights() {
-        let ctx = crate::fonts::test_context();
+        let ctx = crate::ui_kit::test_support::context();
         super::super::test_support::frame(&ctx, vec![], |ui| {
             let t = Tokens::get();
             let header = assistant_header(ui, |ui| {

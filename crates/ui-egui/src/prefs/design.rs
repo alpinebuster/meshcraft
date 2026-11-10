@@ -48,7 +48,7 @@ pub(super) fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
                 ui_kit::row(ui, app.tr("ui.length_decimals"), |ui| {
                     ui.scope(|ui| {
                         ui.spacing_mut().interact_size.x = t.space_24 * 2.0 + t.space_8;
-                        let response = ui_kit::number_field(ui, &mut app.preferences.length_decimals, 0..=6, 1.0, "");
+                        let response = ui_kit::whole_number_field(ui, &mut app.preferences.length_decimals, 0..=6, "");
                         crate::scenario::publish_target("prefs:length_decimals", response.rect);
                     });
                     ui.add_space(t.space_6);
@@ -62,7 +62,7 @@ pub(super) fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
                 ui_kit::row(ui, app.tr("ui.angle_decimals"), |ui| {
                     ui.scope(|ui| {
                         ui.spacing_mut().interact_size.x = t.space_24 * 2.0 + t.space_8;
-                        let response = ui_kit::number_field(ui, &mut app.preferences.angle_decimals, 0..=6, 1.0, "");
+                        let response = ui_kit::whole_number_field(ui, &mut app.preferences.angle_decimals, 0..=6, "");
                         crate::scenario::publish_target("prefs:angle_decimals", response.rect);
                     });
                     ui.add_space(t.space_6);
@@ -70,7 +70,7 @@ pub(super) fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
                 });
                 ui_kit::settings_row_help(ui, app.tr("prefs.parameter_list_rows"), app.tr("prefs.parameter_list_rows_tip"), |ui| {
                     let response = ui_kit::named_control(ui, app.tr("prefs.design_tools.rows"), |ui| {
-                        ui_kit::settings_number(ui, &mut app.preferences.parameter_list_rows, PARAMETER_LIST_ROWS, 1.0)
+                        ui_kit::settings_whole_number(ui, &mut app.preferences.parameter_list_rows, PARAMETER_LIST_ROWS)
                     });
                     crate::scenario::publish_target("prefs:parameter_list_rows", response.rect);
                     crate::scenario::publish_target(&format!("dialog:{}", app.tr("prefs.parameter_list_rows")), response.rect);
@@ -94,7 +94,7 @@ pub(super) fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
                     let response = setting(app, ui).backing_on_hover_text(app.tr(help));
                     crate::scenario::publish_target(&format!("prefs:{target}"), response.rect);
                     crate::scenario::publish_target(&format!("dialog:{legacy}"), response.rect);
-                    if !crate::prefs_search::suppress_chrome(ui) {
+                    if !crate::ui_kit::settings_search::suppress_chrome(ui) {
                         ui_kit::help_icon(ui, app.tr(help));
                     }
                 });
@@ -141,7 +141,7 @@ pub(super) fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
             ui.horizontal_wrapped(|ui| {
                 let response = setting::offer_stand_up(app, ui).backing_on_hover_text(app.tr("prefs.stand_up_note"));
                 crate::scenario::publish_target("prefs:offer_stand_up", response.rect);
-                if !crate::prefs_search::suppress_chrome(ui) {
+                if !crate::ui_kit::settings_search::suppress_chrome(ui) {
                     ui_kit::help_icon(ui, app.tr("prefs.stand_up_note"));
                 }
             });
@@ -179,7 +179,7 @@ pub(super) fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
                 let response = setting::double_click_components(app, ui).backing_on_hover_text(app.tr("prefs.design_tools.double_click_help"));
                 crate::scenario::publish_target("prefs:double_click_components", response.rect);
                 crate::scenario::publish_target("dialog:Double-click a component to activate it, or to edit a linked one in place", response.rect);
-                if !crate::prefs_search::suppress_chrome(ui) {
+                if !crate::ui_kit::settings_search::suppress_chrome(ui) {
                     ui_kit::help_icon(ui, app.tr("prefs.design_tools.double_click_help"));
                 }
             });

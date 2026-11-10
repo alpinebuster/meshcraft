@@ -416,6 +416,7 @@ fn control_role(command: &str, label: &str) -> Option<egui::accesskit::Role> {
         "Type" if matches!(command, "sheet.flange" | "sheet.hem" | "solid.revolve" | "solid.emboss" | "solid.scale") => return None,
         "Direction" => return None, // segmented buttons, labelled by each choice
         "ui.fair_strength" | "ui.fair_iterations" => return None,
+        "Size" if matches!(command, "solid.cylinder" | "solid.sphere") => return None, // Diameter | Radius
         "Continuity" | "Corners" | "Cells" | "Profile" => return None,
         "Operation" if command == "solid.mirror" => return None,
         "Operation" | "Type" | "Orientation" | "Move Type" | "Object Type" | "Rule" | "Rim Edge" | "Catch Direction" | "Shape" | "Holes" | "Size"
@@ -453,7 +454,7 @@ fn motion_dialog_hints_are_translated() {
     }
     let mut h = fixture();
     h.app.preferences.language = "ja".into();
-    let _japanese = crate::i18n::scope("ja");
+    let _japanese = solidcraft_ui_text::scope("ja");
     for (command, english) in [("motion.study", "add a key for a joint first"), ("motion.trace", "select a point on a component")] {
         let mut d = Dialog::for_command(&h.app, command).unwrap();
         let mut painted = Vec::new();
@@ -472,7 +473,7 @@ fn motion_dialog_hints_are_translated() {
             out.shapes.iter().for_each(|shape| texts(&shape.shape, &mut painted));
         }
         assert!(!painted.iter().any(|p| p == english), "{command} paints {english:?} in Japanese");
-        assert!(painted.iter().any(|p| p == crate::i18n::tr_label(english)), "{command} paints {painted:?}");
+        assert!(painted.iter().any(|p| p == solidcraft_ui_text::tr_label(english)), "{command} paints {painted:?}");
     }
 }
 
@@ -559,6 +560,26 @@ fn rectangular_pattern_takes_features_from_every_history_layout() {
         let commands = apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
         assert_eq!(commands[0].1["features"], json!(["Cylinder1"]), "{dock}: the command receives the chosen feature");
     }
+}
+
+/// #13170: with the History in the Browser, a click on one of its feature rows goes to the open
+/// Pattern or Mirror dialog like a click in the bottom or left History.
+#[test]
+fn a_dialog_takes_features_from_the_browser_history_rows() {
+    let mut h = Harness::new();
+    h.app.preferences.history_in_browser = true;
+    h.app.run("solid.box", json!({"length": 80, "width": 60, "height": 20})).unwrap();
+    h.app.run("solid.cylinder", json!({"base": [20, 20, 20], "radius": 5, "height": 10, "operation": "join"})).unwrap();
+    let id = h.app.session.doc.find_feature("Cylinder1").unwrap().id;
+    h.app.run("select.clear", json!({})).unwrap();
+    h.app.start("solid.pattern.rectangular");
+    h.frames(4);
+    mirror_object_type(&mut h, "Features");
+    h.frames(3);
+    h.step(&json!({"click": {"handle": format!("row:browser-feature:c0:{id}")}})).unwrap();
+    let d = h.app.dialog.as_ref().unwrap();
+    assert_eq!(d.inputs[0].items, vec![Sel::Feature { id }], "the dialog receives the Browser History feature");
+    assert!(h.app.session.selection.is_empty(), "a dialog pick does not replace the ordinary selection");
 }
 
 form_case!(loft, "solid.loft", ["Operation"]);
@@ -677,8 +698,8 @@ form_case!(stock, "solid.bounding_solid", ["Margin"]);
 form_case!(frame_member, "frame.member", ["All Lines", "Anchor", "Angle", "Mirror", "Name"]);
 form_case!(thread, "solid.thread", ["Form", "Size", "Pitch", "Designation", "Hand", "Starts", "Extent", "Start", "End"]);
 form_case!(primitive_box, "solid.box", ["ui.length", "ui.width", "ui.height", "Operation"]);
-form_case!(cylinder, "solid.cylinder", ["ui.diameter", "ui.height", "Operation"]);
-form_case!(sphere, "solid.sphere", ["ui.diameter", "Operation"]);
+form_case!(cylinder, "solid.cylinder", ["Size", "ui.diameter", "ui.height", "Operation"]);
+form_case!(sphere, "solid.sphere", ["Size", "ui.diameter", "Operation"]);
 form_case!(torus, "solid.torus", ["ui.major_radius", "ui.minor_radius", "Operation"]);
 form_case!(cone, "solid.cone", ["ui.diameter", "ui.top_diameter", "ui.height", "Operation"]);
 form_case!(coil, "solid.coil", ["ui.diameter", "ui.revolutions", "ui.pitch", "ui.section_size", "Operation"]);
@@ -746,7 +767,7 @@ fn hand_drawn_dialog_texts_are_translated() {
     }
     let mut h = fixture();
     h.app.preferences.language = "ja".into();
-    let _japanese = crate::i18n::scope("ja");
+    let _japanese = solidcraft_ui_text::scope("ja");
     for (command, english) in [
         ("joint.gear", "▶ Play"),
         ("motion.study", "Loop"),
@@ -790,7 +811,7 @@ fn revolve_layout_fixture_builds_a_valid_solid() {
 
 #[test]
 fn new_cards_settle_before_the_first_click_in_both_layouts() {
-    for mode in [crate::shell::LayoutMode::Floating, crate::shell::LayoutMode::Docked] {
+    for mode in [crate::ui_kit::LayoutMode::Floating, crate::ui_kit::LayoutMode::Docked] {
         for command in ["solid.box", "solid.revolve", "solid.shell", "joint.create"] {
             let mut h = fixture();
             h.call("ui.set", json!({"layout":mode}));
@@ -1115,6 +1136,7 @@ fn draft_uses_the_picked_solid_beside_a_hidden_overlapping_mesh() {
                 positions: mesh.positions.iter().flat_map(|p| [p.x, p.y, p.z]).collect(),
                 triangles: mesh.triangles.iter().flatten().copied().collect(),
                 color: None,
+                corner_normals: Default::default(),
             }],
         },
         Some("Imported mesh"),
@@ -1203,6 +1225,42 @@ fn solid_pattern_quantity_arrows_step_the_count_the_command_receives() {
         set(&mut h, "copies");
         h.step(&json!({"click":{"handle":format!("dialog:{label} up")}})).unwrap();
         assert_eq!(sent(&h), json!("copies + 1"), "{command}");
+        h.step(&json!({"click":{"handle":"dialog:cancel"}})).unwrap();
+        h.settle();
+    }
+}
+
+/// The Rectangular Pattern dialog shows each direction as its own group, with its pick, Quantity,
+/// Spacing and (for features) Alignment in the same order for both directions, under a heading
+/// that separates the two (#9634).
+#[test]
+fn rectangular_pattern_groups_each_direction_in_the_same_order() {
+    let mut h = Harness::new();
+    h.app.run("solid.box", json!({"length": 40, "width": 30, "height": 10})).unwrap();
+    for features in [false, true] {
+        h.app.start("solid.pattern.rectangular");
+        h.frames(4);
+        if features {
+            mirror_object_type(&mut h, "Features");
+            h.frames(2);
+        }
+        let objects = h.app.dialog.as_ref().unwrap().inputs[0].label;
+        let group = |n: &str, rows: [&str; 3]| {
+            let mut keys = vec![format!("dialog:section:Direction {n}")];
+            keys.extend(rows.iter().map(|row| format!("dialog:row:{row}")));
+            if features {
+                keys.push(format!("dialog:row:{}", if n == "1" { "Alignment" } else { "Alignment 2" }));
+            }
+            keys
+        };
+        let mut order = vec![format!("dialog:row:{objects}")];
+        order.extend(group("1", ["Direction", "Quantity", "Spacing"]));
+        order.extend(group("2", ["Direction 2", "Quantity 2", "Spacing 2"]));
+        let tops: Vec<f32> =
+            order.iter().map(|key| scenario::rect_of(key).unwrap_or_else(|| panic!("features {features}: {key} is shown")).top()).collect();
+        for (pair, keys) in tops.windows(2).zip(order.windows(2)) {
+            assert!(pair[0] < pair[1], "features {features}: {} shows above {}", keys[0], keys[1]);
+        }
         h.step(&json!({"click":{"handle":"dialog:cancel"}})).unwrap();
         h.settle();
     }
@@ -1401,13 +1459,13 @@ fn extrude_builds_the_one_region_clicked_where_the_face_outline_cuts_a_profile()
 #[test]
 fn every_selection_field_label_is_translated() {
     let h = fixture();
-    let _japanese = crate::i18n::scope("ja");
+    let _japanese = solidcraft_ui_text::scope("ja");
     let mut missing = std::collections::BTreeSet::new();
     for spec in solidcraft_engine::command_specs() {
         let Some(d) = Dialog::for_command(&h.app, spec.id) else { continue };
         for input in &d.inputs {
             let label = input.label.trim();
-            if label.chars().any(|c| c.is_ascii_alphabetic()) && crate::i18n::tr_label(label) == label {
+            if label.chars().any(|c| c.is_ascii_alphabetic()) && solidcraft_ui_text::tr_label(label) == label {
                 missing.insert(format!("{}: {label}", spec.id));
             }
         }
@@ -1570,9 +1628,9 @@ fn pattern_says_why_a_clicked_sketch_is_not_taken() {
         }
     }
     assert!(crate::dialogs::missing_pick(crate::dialogs::SKETCH_NOT_OBJECT), "shown as what to pick, with no Create Issue");
-    let _japanese = crate::i18n::scope("ja");
-    assert!(!crate::i18n::tr_label(crate::dialogs::SKETCH_NOT_OBJECT).is_ascii(), "the hint reads in the user's language");
-    assert!(!crate::i18n::tr("ui.pattern_object_type_tip").is_ascii(), "so does the Object Type tooltip");
+    let _japanese = solidcraft_ui_text::scope("ja");
+    assert!(!solidcraft_ui_text::tr_label(crate::dialogs::SKETCH_NOT_OBJECT).is_ascii(), "the hint reads in the user's language");
+    assert!(!solidcraft_ui_text::tr("ui.pattern_object_type_tip").is_ascii(), "so does the Object Type tooltip");
 }
 
 /// Features stored with bare numbers edit with their units written out, as the Plastic ones do
@@ -1682,7 +1740,7 @@ fn dialog_sketch_selection_labels_translate_and_keep_identifiers() {
         (Sel::SketchConstraint { id: "k3".into() }, "Constraint k3", "Bedingung k3"),
     ] {
         for (language, expected) in [("en", english), ("de", german)] {
-            let _language = crate::i18n::scope(language);
+            let _language = solidcraft_ui_text::scope(language);
             assert_eq!(selection_label(&h.app.session, h.app.preferences.origin_plane_names, &d, &d.inputs[0], &sel), expected);
         }
     }

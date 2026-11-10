@@ -14,28 +14,12 @@ use egui::{Pos2, Rect, pos2, vec2};
 use serde_json::json;
 use solidcore_record::Vec3;
 use solidcraft_engine::geom::prelude::*;
-use solidcraft_engine::render::Camera;
+use solidcraft_viewport::Camera;
 
 use crate::SolveApp;
 use crate::prefs::{OrbitAround, pivot_under};
 use crate::space_mouse::{BridgeMotion, Motion};
 use crate::viewport::{Hit, NavMode, axis_rect, nearest_quarter_turn, pick, pick_cached, projection};
-
-/// Take a predominantly horizontal wheel gesture for a hovered scroll viewport.
-/// Leave vertical input for its enclosing page, and leave horizontal input
-/// unconsumed when this viewport is already at the requested end.
-pub(crate) fn take_horizontal_wheel(ui: &egui::Ui, offset: f32, max_offset: f32) -> f32 {
-    ui.input_mut(|input| {
-        let delta = input.smooth_scroll_delta;
-        if delta.x == 0.0 || delta.x.abs() <= delta.y.abs() {
-            return 0.0;
-        }
-        if (offset - delta.x).clamp(0.0, max_offset) != offset {
-            input.smooth_scroll_delta.x = 0.0;
-        }
-        delta.x
-    })
-}
 
 /// What a page's camera may do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -462,7 +446,8 @@ pub(crate) struct KeyHold {
 
 /// A menu, the command box or a focused widget has the keyboard, so the view keys are not ours.
 fn view_keys_blocked(app: &SolveApp, ctx: &egui::Context, canvas: Option<egui::Id>) -> bool {
-    egui::Popup::is_any_open(ctx)
+    (app.prefs_window.shell.open && app.prefs_window.shell.section == crate::prefs::PAGE_LAYOUT)
+        || egui::Popup::is_any_open(ctx)
         || app.viewport.context_menu.is_some()
         || app.ui.palette_open
         || ctx.memory(|m| m.focused().is_some_and(|focused| Some(focused) != canvas))
@@ -608,6 +593,7 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
         )
     });
     let hover = hover.filter(|p| !crate::frame::dock_dragging(ui.ctx()) && !crate::shell::covered(app, *p));
+    let delta = unwrapped_delta(app, delta);
     // The right button belongs to the marking menu while it is open.
     let secondary_down = secondary_down && app.viewport.context_menu.is_none();
     // The axis view handles its own clicks; the model underneath must not see them.
@@ -733,7 +719,7 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
     let zoom_held = (inside || app.viewport.zoom_shortcut_drag)
         && ui.input(|input| crate::keymap::drag_zoom_held(app, input))
         && !view_keys_blocked(app, ui.ctx(), Some(resp.id))
-        && !app.prefs_window.open
+        && !app.prefs_window.shell.open
         && !crate::dim_view::editing();
     if primary_pressed {
         app.viewport.zoom_shortcut_drag = inside && zoom_held;
@@ -887,6 +873,7 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
                 None => app.viewport.nav.is_some(),
             };
         orbit_drag(app, rect, f64::from(delta.x), f64::from(delta.y), press, snap, true);
+        wrap_cursor(app, ui, rect);
     } else {
         if app.viewport.axis_drag.is_none() {
             app.viewport.orbit_free = None;
@@ -912,6 +899,7 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
     if !dragging && motion.is_none() && !(trackpad_orbit && app.viewport.trackpad_gesture) {
         app.viewport.orbit_pivot = None;
         app.viewport.orbit_from = None;
+        app.viewport.cursor_wrap = None;
     }
     if app.viewport.spin {
         // A click on the navigation bar (its own button) is not a stop.
@@ -952,6 +940,58 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
     let inside = inside && !zoom_drag;
     let primary_nav = if zoom_drag { Some(NavMode::Zoom) } else { primary_nav };
     CameraInput { hover, scroll, mods, middle, secondary_down, primary_down, primary_pressed, inside, axes, pinch, pan, primary_nav, mode }
+}
+
+/// How close to the view's edge (points) an orbit drag moves the cursor to the other side.
+const WRAP_MARGIN: f32 = 4.0;
+
+/// An orbit drag that reaches the edge of the view keeps turning: the cursor moves to the other
+/// side of the view, so the drag can go on round the model as far as the user likes instead of
+/// stopping where the screen ends. One move at a time; the next waits until the pointer has
+/// reported the jump ([`unwrapped_delta`]). Where the cursor can't be moved (Wayland, the
+/// browser) the request does nothing, the jump never arrives and the drag stops at the edge. A
+/// synthetic drag (control channel, scripts) has no real cursor to move. With
+/// `orbit_cursor_wrap` off in the preferences the drag stops at the edge of the screen.
+pub(crate) fn wrap_cursor(app: &mut SolveApp, ui: &egui::Ui, rect: Rect) {
+    if !app.preferences.orbit_cursor_wrap || app.viewport.cursor_wrap.is_some() || app.synthetic_press {
+        return;
+    }
+    let Some(at) = ui.input(|i| i.pointer.latest_pos()) else { return };
+    let Some(to) = wrapped(rect, at) else { return };
+    ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorPosition(to));
+    app.viewport.cursor_wrap = Some(to - at);
+}
+
+/// Where a pointer at `at`, at or past the edge of `rect`, continues on the opposite side; `None`
+/// while it is well inside.
+pub(crate) fn wrapped(rect: Rect, at: Pos2) -> Option<Pos2> {
+    let inner = rect.shrink(WRAP_MARGIN);
+    if !at.is_finite() || !inner.is_finite() || inner.width() < 2.0 * WRAP_MARGIN || inner.height() < 2.0 * WRAP_MARGIN {
+        return None;
+    }
+    let across = |v: f32, lo: f32, hi: f32| {
+        if v < lo {
+            v + (hi - lo)
+        } else if v > hi {
+            v - (hi - lo)
+        } else {
+            v
+        }
+    };
+    let to = inner.clamp(pos2(across(at.x, inner.min.x, inner.max.x), across(at.y, inner.min.y, inner.max.y)));
+    (to != at).then_some(to)
+}
+
+/// The pointer's motion this frame without the jump of a cursor wrap: the frame that reports it
+/// moves the camera only by what the hand did.
+fn unwrapped_delta(app: &mut SolveApp, delta: egui::Vec2) -> egui::Vec2 {
+    let Some(jump) = app.viewport.cursor_wrap else { return delta };
+    if (delta - jump).length() < jump.length() * 0.5 {
+        app.viewport.cursor_wrap = None;
+        delta - jump
+    } else {
+        delta
+    }
 }
 
 /// The 3D mouse's motion this frame (#1336), on a page `rect` whose camera may do `caps`: the cap
@@ -1574,7 +1614,7 @@ mod tests {
     fn touchpad_free_orbit_setting_reaches_the_shared_command() {
         use super::*;
         for caps in [NavCaps::MODEL, NavCaps::RENDER, NavCaps { orbit: false, pick: false }] {
-            for up in [solidcraft_engine::render::UpAxis::Y, solidcraft_engine::render::UpAxis::Z] {
+            for up in [solidcraft_viewport::UpAxis::Y, solidcraft_viewport::UpAxis::Z] {
                 for free in [false, true] {
                     let ctx = egui::Context::default();
                     let mut app = crate::SolveApp::new(Default::default(), crate::Services::default());
@@ -1609,7 +1649,7 @@ mod tests {
     #[test]
     fn touchpad_free_orbit_keeps_the_rigid_pivot_in_both_projections() {
         use super::*;
-        for up in [solidcraft_engine::render::UpAxis::Y, solidcraft_engine::render::UpAxis::Z] {
+        for up in [solidcraft_viewport::UpAxis::Y, solidcraft_viewport::UpAxis::Z] {
             for fov in [0.0, 0.6] {
                 for around in [OrbitAround::Origin, OrbitAround::Cursor] {
                     let ctx = egui::Context::default();
@@ -1673,7 +1713,7 @@ mod tests {
     #[test]
     fn every_standard_direction_preserves_its_nearby_quarter_orientation() {
         use super::*;
-        use solidcraft_engine::render::UpAxis;
+        use solidcraft_viewport::UpAxis;
         for up in [UpAxis::Z, UpAxis::Y] {
             for fov in [0.0, 0.6] {
                 for direction in snap_directions() {
@@ -1702,7 +1742,7 @@ mod tests {
     #[test]
     fn free_orbit_shift_snaps_direction_and_quarter_turn_roll() {
         use super::*;
-        use solidcraft_engine::render::UpAxis;
+        use solidcraft_viewport::UpAxis;
         let rect = Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0));
         for up in [UpAxis::Z, UpAxis::Y] {
             for fov in [0.0, 0.6] {
@@ -1732,7 +1772,7 @@ mod tests {
     #[test]
     fn free_orbit_shift_keeps_the_pivot_and_resumes_the_unsnapped_drag() {
         use super::*;
-        use solidcraft_engine::render::UpAxis;
+        use solidcraft_viewport::UpAxis;
         let rect = Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0));
         for up in [UpAxis::Z, UpAxis::Y] {
             for fov in [0.0, 0.6] {
@@ -1814,7 +1854,7 @@ mod tests {
     #[test]
     fn free_orbit_upright_turns_about_the_vertical_axis_past_the_pole() {
         use super::*;
-        for up in [solidcraft_engine::render::UpAxis::Z, solidcraft_engine::render::UpAxis::Y] {
+        for up in [solidcraft_viewport::UpAxis::Z, solidcraft_viewport::UpAxis::Y] {
             let mut h = crate::scenario::Harness::new();
             h.app.preferences.free_orbit = true;
             h.app.preferences.free_orbit_upright = true;
@@ -1856,14 +1896,14 @@ mod tests {
     #[test]
     fn solidworks_mouse_orbit_passes_the_pole_and_shift_snaps() {
         use serde_json::json;
-        for up in [solidcraft_engine::render::UpAxis::Z, solidcraft_engine::render::UpAxis::Y] {
+        for up in [solidcraft_viewport::UpAxis::Z, solidcraft_viewport::UpAxis::Y] {
             for button in ["middle", "right"] {
                 let mut h = crate::scenario::Harness::new();
                 h.app.home.open = false;
                 h.app.preferences.nav = "solidworks".into();
                 h.app.preferences.free_orbit = true;
                 h.app.ui.up_axis = up;
-                h.app.cam = solidcraft_engine::render::Camera { yaw: 0.0, pitch: 1.4, up, ..Default::default() };
+                h.app.cam = solidcraft_viewport::Camera { yaw: 0.0, pitch: 1.4, up, ..Default::default() };
                 let before = h.app.cam;
                 h.call("ui.drag", json!({"x0":800,"y0":400,"x1":800,"y1":480,"button":button,"steps":40}));
                 assert!((h.app.cam.back().dot(before.back()) - 0.64_f64.cos()).abs() < 1e-6, "{up:?} {button}: {:?}", h.app.cam);
@@ -2006,7 +2046,8 @@ mod tests {
         ];
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let dirs = [root.join("src"), root.join("../../apps/solidcraft/src"), root.join("../../apps/solidcraft-web/src")];
-        let allowed = ["navigation.rs"];
+        // The kit's wheel.rs scrolls strips (a horizontal wheel over a hovered scroll area), not cameras.
+        let allowed = ["navigation.rs", "wheel.rs"];
         let mut offenders = Vec::new();
         let mut scanned = 0;
         let mut stack: Vec<std::path::PathBuf> = dirs.iter().filter(|d| d.is_dir()).cloned().collect();
@@ -2540,6 +2581,103 @@ mod tests {
         }
     }
 
+    /// Past an edge of the view the pointer continues from the opposite edge; well inside, it
+    /// stays where it is.
+    #[test]
+    fn the_cursor_wraps_to_the_opposite_edge() {
+        use egui::{Rect, pos2, vec2};
+        let view = Rect::from_min_size(pos2(100.0, 50.0), vec2(800.0, 600.0));
+        assert_eq!(super::wrapped(view, pos2(500.0, 300.0)), None);
+        assert_eq!(super::wrapped(view, pos2(104.0, 54.0)), None, "on the margin itself");
+        assert_eq!(super::wrapped(view, pos2(900.0, 300.0)), Some(pos2(108.0, 300.0)), "right to left");
+        assert_eq!(super::wrapped(view, pos2(100.0, 300.0)), Some(pos2(892.0, 300.0)), "left to right");
+        assert_eq!(super::wrapped(view, pos2(500.0, 650.0)), Some(pos2(500.0, 58.0)), "bottom to top");
+        assert_eq!(super::wrapped(view, pos2(500.0, 40.0)), Some(pos2(500.0, 632.0)), "top to bottom, from outside");
+        assert_eq!(super::wrapped(view, pos2(901.0, 651.0)), Some(pos2(109.0, 59.0)), "a corner wraps both ways");
+        assert_eq!(super::wrapped(view, pos2(5000.0, 300.0)), Some(pos2(896.0, 300.0)), "far outside lands inside");
+        assert_eq!(super::wrapped(view, pos2(f32::NAN, 300.0)), None);
+        assert_eq!(super::wrapped(Rect::from_min_size(pos2(0.0, 0.0), vec2(10.0, 10.0)), pos2(20.0, 5.0)), None, "too small a view");
+    }
+
+    /// An orbit drag that reaches the edge of the view keeps turning round the model: the cursor
+    /// moves to the other side, and the frame that reports the jump turns the view only by the
+    /// hand's motion. Events from before the move don't ask for a second one. With
+    /// `orbit_cursor_wrap` off the cursor is never moved.
+    #[test]
+    fn an_orbit_drag_at_the_edge_moves_the_cursor_across_and_keeps_turning() {
+        use crate::prefs::NavButton;
+        use egui::{Event, Modifiers, PointerButton, ViewportCommand, pos2, vec2};
+        let mut s = solidcraft_engine::Session::default();
+        s.execute("solid.box", &serde_json::json!({"length":40,"width":30,"height":20})).unwrap();
+        let mut app = crate::SolveApp::new(s, crate::Services::default());
+        let (button, mods) = [(PointerButton::Secondary, NavButton::Right), (PointerButton::Middle, NavButton::Middle)]
+            .into_iter()
+            .flat_map(|b| [Modifiers::NONE, Modifiers::SHIFT].map(move |m| (b, m)))
+            .find(|((_, b), m)| crate::prefs::nav_mode(&app, *b, *m) == Some(crate::viewport::NavMode::Orbit))
+            .map(|((p, _), m)| (p, m))
+            .expect("the default preset orbits with the right or middle button");
+        let ctx = egui::Context::default();
+        let mut time = 0.0;
+        let mut frame = |app: &mut crate::SolveApp, events: Vec<Event>| {
+            time += 1.0 / 60.0;
+            let events = std::iter::once(Event::ModifiersChanged(mods)).chain(events).collect();
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0))),
+                time: Some(time),
+                focused: true,
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(raw, |ui| {
+                let rect = ui.max_rect();
+                app.viewport.rect = Some(rect);
+                let resp = ui.interact(rect, ui.scope_id().with("model"), egui::Sense::click_and_drag());
+                super::handle(app, ui, rect, &resp, super::NavCaps::MODEL);
+            });
+            out.textures_delta.clear();
+            let commands = out.viewport_output.remove(&egui::ViewportId::ROOT).map(|v| v.commands).unwrap_or_default();
+            commands.into_iter().filter_map(|c| if let ViewportCommand::CursorPosition(p) = c { Some(p) } else { None }).collect::<Vec<_>>()
+        };
+        let turn = |a: f64, b: f64| (b - a + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI;
+        let at = pos2(600.0, 300.0);
+        frame(&mut app, vec![Event::PointerMoved(at)]);
+        frame(&mut app, vec![Event::PointerButton { pos: at, button, pressed: true, modifiers: mods }]);
+        let mut x = at.x;
+        let mut step = 0.0;
+        while x < 780.0 {
+            x += 20.0;
+            let before = app.cam.yaw;
+            assert!(frame(&mut app, vec![Event::PointerMoved(pos2(x, 300.0))]).is_empty(), "no move inside the view ({x})");
+            step = turn(before, app.cam.yaw);
+        }
+        assert!(step.abs() > 1e-4, "the drag turns the view");
+        // Past the right edge: the cursor goes to the left edge.
+        let before = app.cam.yaw;
+        assert_eq!(frame(&mut app, vec![Event::PointerMoved(pos2(800.0, 300.0))]), vec![pos2(8.0, 300.0)]);
+        assert!((turn(before, app.cam.yaw) - step).abs() < step.abs() * 0.01, "and the view turns on as usual");
+        // A move the window had queued before the cursor moved: no second request.
+        assert!(frame(&mut app, vec![Event::PointerMoved(pos2(806.0, 300.0))]).is_empty());
+        // The pointer reports the jump plus 20 points more of the hand's motion.
+        let before = app.cam.yaw;
+        assert!(frame(&mut app, vec![Event::PointerMoved(pos2(34.0, 300.0))]).is_empty());
+        let after = turn(before, app.cam.yaw);
+        assert!((after - step).abs() < step.abs() * 0.01, "the jump doesn't turn the view: {after} vs {step}");
+        assert_eq!(app.viewport.cursor_wrap, None);
+        let before = app.cam.yaw;
+        frame(&mut app, vec![Event::PointerMoved(pos2(54.0, 300.0))]);
+        assert!((turn(before, app.cam.yaw) - step).abs() < step.abs() * 0.01, "and keeps turning the same way");
+        frame(&mut app, vec![Event::PointerButton { pos: pos2(54.0, 300.0), button, pressed: false, modifiers: mods }]);
+        frame(&mut app, vec![]);
+        assert_eq!(app.viewport.cursor_wrap, None);
+        // With the preference off, the same drag reaches the edge and the cursor stays there.
+        app.preferences.orbit_cursor_wrap = false;
+        frame(&mut app, vec![Event::PointerButton { pos: at, button, pressed: true, modifiers: mods }]);
+        for x in [620.0, 700.0, 780.0, 800.0, 806.0] {
+            assert!(frame(&mut app, vec![Event::PointerMoved(pos2(x, 300.0))]).is_empty(), "no cursor move with wrapping off ({x})");
+        }
+        assert_eq!(app.viewport.cursor_wrap, None);
+    }
+
     /// A device app's orbit turns pages that orbit and pans the others (a flat page, a sketch seen
     /// square-on), so the device still moves the view there without turning it.
     #[test]
@@ -2558,7 +2696,7 @@ mod tests {
             let mut app = crate::SolveApp::new(session, crate::Services::default());
             if app.session.active_sketch.is_some() {
                 // Square to the sketch, as a sketch opens.
-                app.cam = solidcraft_engine::render::Camera { yaw: 0.0, pitch: std::f64::consts::FRAC_PI_2, ..Default::default() };
+                app.cam = solidcraft_viewport::Camera { yaw: 0.0, pitch: std::f64::consts::FRAC_PI_2, ..Default::default() };
             }
             let before = app.cam;
             app.viewport.bridge_motion = Some(orbit);
@@ -2688,7 +2826,7 @@ mod tests {
     #[test]
     fn the_3d_mouse_turns_a_sketch_only_after_the_view_is_tilted() {
         use crate::space_mouse::{DeviceMotion, Motion};
-        use solidcraft_engine::render::Camera;
+        use solidcraft_viewport::Camera;
         let mut s = solidcraft_engine::Session::default();
         s.execute("sketch.create", &serde_json::json!({"plane": "XY"})).unwrap();
         let mut app = crate::SolveApp::new(s, crate::Services::default());
@@ -2725,7 +2863,7 @@ mod tests {
     #[test]
     fn the_3d_mouse_turns_a_square_on_sketch_when_the_preference_allows_it() {
         use crate::space_mouse::{BridgeMotion, DeviceMotion, Motion};
-        use solidcraft_engine::render::Camera;
+        use solidcraft_viewport::Camera;
         let mut s = solidcraft_engine::Session::default();
         s.execute("sketch.create", &serde_json::json!({"plane": "XY"})).unwrap();
         let mut app = crate::SolveApp::new(s, crate::Services::default());
@@ -2805,6 +2943,37 @@ mod view_key_tests {
 
     fn arrow(pressed: bool, repeat: bool) -> egui::Event {
         egui::Event::Key { key: egui::Key::ArrowLeft, physical_key: None, pressed, repeat, modifiers: egui::Modifiers::NONE }
+    }
+
+    #[test]
+    fn unfocused_layout_preferences_owns_view_keys_while_general_preserves_camera_preview() {
+        let mut app = crate::SolveApp::new(Default::default(), Default::default());
+        app.preferences.look_at_anim = false;
+        let ctx = crate::fonts::test_context();
+        let mut output = ctx.run_ui(egui::RawInput { events: vec![arrow(true, false)], focused: true, ..Default::default() }, |ui| {
+            assert!(ui.memory(|memory| memory.focused().is_none()));
+            assert!(!egui::Popup::is_any_open(ui.ctx()));
+            app.prefs_window.shell.open = true;
+            app.prefs_window.shell.section = crate::prefs::PAGE_LAYOUT;
+            let before = app.cam;
+            let log = app.session.log.len();
+            assert!(!super::view_key(&mut app, ui.ctx(), egui::Key::ArrowLeft, egui::Modifiers::NONE, false));
+            assert_eq!(app.cam, before, "Layout keeps the arrow even before a selector has focus");
+            assert_eq!(app.session.log.len(), log);
+            assert!(app.viewport.key_hold.is_none());
+
+            app.prefs_window.shell.section = crate::prefs::PAGE_GENERAL;
+            assert!(super::view_key(&mut app, ui.ctx(), egui::Key::ArrowLeft, egui::Modifiers::NONE, false));
+            assert!(app.viewport.key_hold.is_some(), "General retains unfocused arrow camera preview");
+            app.now += super::TAP_SECONDS + 1.0;
+            app.prefs_window.shell.section = crate::prefs::PAGE_LAYOUT;
+            let before = app.cam;
+            assert!(ui.input(|input| input.key_down(egui::Key::ArrowLeft)));
+            super::step_key_hold(&mut app, ui.ctx());
+            assert!(app.viewport.key_hold.is_none(), "opening Layout releases a previous held view key");
+            assert_eq!(app.cam, before);
+        });
+        output.textures_delta.clear();
     }
 
     /// A press and release in one frame, without the harness settling the view after it.
@@ -2897,7 +3066,7 @@ mod view_key_tests {
     /// do; the keys are ordinary shortcuts, so one can be moved to another command and back.
     #[test]
     fn ctrl_digits_turn_to_the_standard_views_and_can_be_rebound() {
-        use solidcraft_engine::render::StandardView;
+        use solidcraft_viewport::StandardView;
         let mut h = Harness::new();
         h.app.preferences.look_at_anim = false;
         h.app.run("solid.box", json!({"length": 10, "width": 10, "height": 10})).unwrap();

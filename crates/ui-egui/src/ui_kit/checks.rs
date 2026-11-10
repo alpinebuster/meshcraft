@@ -1,7 +1,7 @@
 //! The only checkbox box and check glyph, shared by inline, palette, grid and menu rows.
-use crate::theme::Tokens;
 use crate::ui_kit::BackingTooltipExt as _;
 use egui::{Rect, Response, Ui, pos2, vec2};
+use solidcraft_theme::Tokens;
 
 /// Fixed logical size and pixel-aligned origin, independent of a caller's fonts or spacing.
 pub(super) fn box_at(ui: &Ui, center: egui::Pos2) -> Rect {
@@ -56,34 +56,51 @@ pub(crate) fn checkbox(ui: &mut Ui, label: &str, value: &mut bool) -> Response {
     checkbox_indeterminate(ui, label, value, false)
 }
 
+/// A checkbox with a command's icon between the box and the label (Customize Toolbar, #11471).
+/// The icon is part of the target. Tokens: as [`checkbox`], plus space_16 for the icon.
+pub(crate) fn checkbox_icon(ui: &mut Ui, label: &str, icon: &str, value: &mut bool) -> Response {
+    check_row(ui, label, icon, value, false)
+}
+
 /// Mixed values become checked when activated; the caller owns whether selection is mixed.
 /// Tokens: space_14/3/2/6, radius_sm, control_fill/border, form_primary/ink, hover, on_accent.
 pub(crate) fn checkbox_indeterminate(ui: &mut Ui, label: &str, value: &mut bool, mixed: bool) -> Response {
-    crate::prefs_search::note_unlabelled(ui, &[label]);
-    if crate::prefs_search::querying(ui) && !crate::prefs_search::visible(ui, &[label]) {
-        return crate::prefs_search::hidden_response(ui);
+    check_row(ui, label, "", value, mixed)
+}
+
+/// The box, then `icon` when it is not empty, then the label.
+fn check_row(ui: &mut Ui, label: &str, icon: &str, value: &mut bool, mixed: bool) -> Response {
+    super::settings_search::note_unlabelled(ui, &[label]);
+    if super::settings_search::querying(ui) && !super::settings_search::visible(ui, &[label]) {
+        return super::settings_search::hidden_response(ui);
     }
     let t = Tokens::get();
     let font = egui::FontId::proportional(t.font_label);
     let gap = if label.is_empty() { 0.0 } else { t.space_6 };
+    let icon_width = if icon.is_empty() { 0.0 } else { t.space_6 + t.space_16 };
     let wrap = ui.style().wrap_mode == Some(egui::TextWrapMode::Wrap);
     let galley = if wrap {
-        ui.painter().layout(label.to_owned(), font.clone(), t.form_ink, (ui.available_width() - t.space_14 - gap).max(0.0))
+        ui.painter().layout(label.to_owned(), font.clone(), t.form_ink, (ui.available_width() - t.space_14 - icon_width - gap).max(0.0))
     } else {
         ui.painter().layout_no_wrap(label.to_owned(), font.clone(), t.form_ink)
     };
-    let width = (t.space_14 + gap + galley.size().x).max(ui.spacing().interact_size.y).min(super::metrics::dimension(ui.available_width()));
-    let height = ui.spacing().interact_size.y.max(t.space_14).max(galley.size().y);
+    let width =
+        (t.space_14 + icon_width + gap + galley.size().x).max(ui.spacing().interact_size.y).min(super::metrics::dimension(ui.available_width()));
+    let height = ui.spacing().interact_size.y.max(t.space_14).max(galley.size().y).max(if icon.is_empty() { 0.0 } else { t.space_16 });
     let (rect, mut response) = ui.allocate_exact_size(vec2(width, height), egui::Sense::click());
-    crate::prefs_search::remember(ui, label, rect);
-    crate::prefs_search::follow(ui, label, rect);
+    super::settings_search::remember(ui, label, rect);
+    super::settings_search::follow(ui, label, rect);
     if response.clicked() {
         *value = mixed || !*value;
         response.mark_changed();
     }
     let square = box_at(ui, pos2(rect.left() + t.space_14 / 2.0, rect.center().y));
     paint_box(ui, square, &response, *value, mixed && !response.changed());
-    let text_rect = Rect::from_min_max(pos2((square.right() + gap).min(rect.right()), rect.top()), rect.max);
+    if !icon.is_empty() {
+        let at = Rect::from_center_size(pos2(square.right() + t.space_6 + t.space_16 / 2.0, rect.center().y), vec2(t.space_16, t.space_16));
+        crate::icons::paint_icon(&ui.painter().with_clip_rect(ui.clip_rect().intersect(rect)), at, icon, 1.0);
+    }
+    let text_rect = Rect::from_min_max(pos2((square.right() + icon_width + gap).min(rect.right()), rect.top()), rect.max);
     if wrap {
         let ppp = ui.ctx().pixels_per_point().max(0.5);
         let at = pos2((text_rect.left() * ppp).round() / ppp, ((text_rect.center().y - galley.size().y / 2.0) * ppp).round() / ppp);
@@ -92,7 +109,7 @@ pub(crate) fn checkbox_indeterminate(ui: &mut Ui, label: &str, value: &mut bool,
         super::text::paint_text(ui, text_rect, label, font, t.form_ink, false);
     }
     response.widget_info(|| {
-        let accessible = if label.is_empty() { crate::i18n::tr_label(super::row_label(ui)) } else { label };
+        let accessible = if label.is_empty() { solidcraft_ui_text::tr_label(super::row_label(ui)) } else { label };
         let mut info = egui::WidgetInfo::selected(egui::Role::CheckBox, ui.is_enabled(), *value, accessible);
         if mixed && !response.changed() {
             info.selected = None;

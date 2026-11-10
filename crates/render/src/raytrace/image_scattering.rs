@@ -8,10 +8,10 @@ pub(super) struct Collision {
     distance: f64,
 }
 
-pub(super) fn enabled(task: &ImageTask) -> bool {
+pub(super) fn enabled(task: &TransportContext<'_>) -> bool {
     task.options.dielectrics.iter().any(|input| input.subsurface.is_some_and(|s| s.active()))
 }
-pub(super) fn active(task: &ImageTask, state: &State) -> job::Result<bool> {
+pub(super) fn active(task: &TransportContext<'_>, state: &State) -> job::Result<bool> {
     let Some(optical) = &state.optical else { return Ok(false) };
     let Some(index) = current(optical)? else { return Ok(false) };
     Ok(task
@@ -23,7 +23,7 @@ pub(super) fn active(task: &ImageTask, state: &State) -> job::Result<bool> {
         .is_some_and(|scattering| scattering.active()))
 }
 
-pub(super) fn step(task: &mut ImageTask, state: &mut State) -> job::Result<()> {
+pub(super) fn step(task: &mut TransportContext<'_>, state: &mut State) -> job::Result<()> {
     match state.stage {
         Stage::Medium => decide(task, state),
         Stage::MediumScatter => scatter(task, state),
@@ -31,7 +31,7 @@ pub(super) fn step(task: &mut ImageTask, state: &mut State) -> job::Result<()> {
         _ => Err(invalid("CPU subsurface bypassed its charged phase")),
     }
 }
-fn decide(task: &ImageTask, state: &mut State) -> job::Result<()> {
+fn decide(task: &TransportContext<'_>, state: &mut State) -> job::Result<()> {
     let optical = state.optical.as_ref().ok_or_else(|| invalid("CPU subsurface stack missing"))?;
     let index = current(optical)?.ok_or_else(|| invalid("CPU subsurface cannot scatter in vacuum"))?;
     let scattering = task
@@ -44,7 +44,7 @@ fn decide(task: &ImageTask, state: &mut State) -> job::Result<()> {
     let ray = state.ray.ok_or_else(|| invalid("CPU subsurface incident ray missing"))?;
     let geometry = if let Some(hit) = state.hit {
         let bvh = task.bvh.as_ref().ok_or_else(|| invalid("CPU subsurface BVH missing"))?;
-        Some(PreparedScene { bvh, primitives: &task.looks, source: &task.scene }.resolve_hit(ray, hit).map_err(error)?)
+        Some(PreparedScene { bvh, primitives: task.looks, source: task.scene }.resolve_hit(ray, hit).map_err(error)?)
     } else {
         None
     };
@@ -100,12 +100,11 @@ fn decide(task: &ImageTask, state: &mut State) -> job::Result<()> {
     state.stage = Stage::MediumOrigin;
     Ok(())
 }
-fn scatter(task: &mut ImageTask, state: &mut State) -> job::Result<()> {
+fn scatter(task: &mut TransportContext<'_>, state: &mut State) -> job::Result<()> {
     let optical = state.optical.as_ref().ok_or_else(|| invalid("CPU subsurface stack missing"))?;
     let event = optical.collision.ok_or_else(|| invalid("CPU subsurface collision missing"))?;
     let index = current(optical)?.ok_or_else(|| invalid("CPU subsurface collision lost its medium"))?;
     let input = task.options.dielectrics.get(index).ok_or_else(|| invalid("CPU subsurface material missing"))?;
-    let scattering = input.subsurface.filter(|s| s.active()).ok_or_else(|| invalid("CPU subsurface rate missing"))?;
     let factor = dielectric::attenuation(input.absorption_per_mm, event.distance).map_err(error)?;
     let throughput = multiply(state.throughput, factor);
     super::super::super::lighting::validate_radiance(throughput).map_err(error)?;
@@ -116,20 +115,38 @@ fn scatter(task: &mut ImageTask, state: &mut State) -> job::Result<()> {
     if state.depth == 0 {
         task.primary_coverage = 1;
     }
-    if throughput == Vec3::ZERO || !continuing(task, state)? {
+    if throughput == Vec3::ZERO {
         state.stage = Stage::Commit;
         return Ok(());
     }
     let incoming = state.ray.ok_or_else(|| invalid("CPU subsurface incident ray missing"))?.direction();
+    if glass_lighting::begin(task, state, glass_lighting::Event::Medium { index, position: event.position, incoming }) {
+        return Ok(());
+    }
+    resume(task, state, index, event.position, incoming)
+}
+pub(super) fn resume(task: &TransportContext<'_>, state: &mut State, index: usize, position: Vec3, incoming: Vec3) -> job::Result<()> {
+    if !continuing(task, state)? {
+        state.stage = Stage::Commit;
+        return Ok(());
+    }
+    let scattering = task
+        .options
+        .dielectrics
+        .get(index)
+        .and_then(|input| input.subsurface)
+        .filter(|scattering| scattering.active())
+        .ok_or_else(|| invalid("CPU subsurface rate missing"))?;
     let uniform = variates(task, state, 0x5001)?;
     let direction = scattering.sample_direction(incoming, uniform).map_err(|e| JobError::new(ErrorCode::InvalidScene, e.to_string()))?;
-    let ray = Ray::new(event.position, direction, 0.0_f64.next_up(), super::super::super::MAX_DISTANCE_MM).map_err(error)?;
+    let ray = Ray::new(position, direction, 0.0_f64.next_up(), super::super::super::MAX_DISTANCE_MM).map_err(error)?;
     let optical = state.optical.as_mut().ok_or_else(|| invalid("CPU subsurface stack missing"))?;
-    optical.segment_start = event.position;
+    optical.segment_start = position;
     optical.source_plane = None;
     optical.delta = true;
     state.previous_pdf = 0.0;
-    state.previous_position = event.position;
+    state.previous_position = position;
+    state.sampled_continuous = true;
     state.ray = Some(ray);
     state.cursor = Some(TraceCursor::new(ray, false));
     state.hit = None;
@@ -141,7 +158,7 @@ fn scatter(task: &mut ImageTask, state: &mut State) -> job::Result<()> {
 
 // Captured preparation keeps each body's primitives contiguous. Walk that range
 // cooperatively instead of an uncharged all-body prefix scan or another array.
-fn surface_range(task: &ImageTask, state: &mut State) -> job::Result<()> {
+fn surface_range(task: &TransportContext<'_>, state: &mut State) -> job::Result<()> {
     let hit = state.hit.ok_or_else(|| invalid("CPU physical surface hit missing"))?;
     let body = task.looks.get(hit.primitive_index).ok_or_else(|| invalid("CPU physical surface primitive missing"))?.body_index;
     let optical = state.optical.as_mut().ok_or_else(|| invalid("CPU physical surface state missing"))?;
@@ -167,7 +184,7 @@ pub(super) fn surface_cursor(state: &State, hit: SharedHit<'_>, direction: Vec3,
 pub(super) fn needs_shadow_setup(state: &State) -> bool {
     state.optical.as_ref().is_some_and(|o| o.surface_range.is_some() && !o.shadow_exact)
 }
-pub(super) fn shadow_setup(task: &ImageTask, state: &mut State) -> job::Result<()> {
+pub(super) fn shadow_setup(task: &TransportContext<'_>, state: &mut State) -> job::Result<()> {
     let hit = unmapped(task, state)?;
     let optical = state.optical.as_ref().ok_or_else(|| invalid("CPU physical shadow state missing"))?;
     let old = optical.shadow_current.ok_or_else(|| invalid("CPU physical shadow ray missing"))?;

@@ -67,7 +67,7 @@ Format and example: [docs/scripts.md](docs/scripts.md). Pages can also be driven
 ## Contributing
 
 Help is welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers how to build and test, the code map,
-the clean-room and licence rules, and where help is wanted most. 
+the clean-room and licence rules, and where help is wanted most.
 
 [windows-msi]: https://github.com/tangency-labs/solidcraft/releases/latest/download/solidcraft-windows-x64.msi
 [macos-dmg]: https://github.com/tangency-labs/solidcraft/releases/latest/download/solidcraft-macos-universal.dmg

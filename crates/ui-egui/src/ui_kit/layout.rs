@@ -1,9 +1,8 @@
 //! Layout elements for dense cards; see `docs/ui-kit.md` for tokens and usage.
 use super::{metrics::*, text::paint_text};
 use crate::ui_kit::BackingTooltipExt as _;
-use crate::{scenario, theme::Tokens};
 use egui::{Response, RichText, Ui, vec2};
-use solidcraft_engine::kernel::Continuity;
+use solidcraft_theme::Tokens;
 
 pub(super) const FORM: &str = "sc_dense_form";
 
@@ -46,7 +45,7 @@ fn scope_inner<R>(ui: &mut Ui, grow: Option<egui::Id>, add: impl FnOnce(&mut Ui)
         ui.style_mut().text_styles.insert(egui::TextStyle::Monospace, egui::FontId::monospace(t.font_body));
         let visuals = ui.visuals_mut();
         visuals.weak_text_color = Some(t.form_dim);
-        visuals.selection.stroke = egui::Stroke::new(1.0, t.form_primary);
+        visuals.selection.stroke = egui::Stroke::new(1.0, selection_ink(&t));
         visuals.selection.bg_fill = t.selected_bg;
         visuals.widgets.noninteractive.bg_stroke = t.tertiary_border(t.dialog_rule);
         for state in [&mut visuals.widgets.inactive, &mut visuals.widgets.hovered, &mut visuals.widgets.active, &mut visuals.widgets.open] {
@@ -62,6 +61,19 @@ fn scope_inner<R>(ui: &mut Ui, grow: Option<egui::Id>, add: impl FnOnce(&mut Ui)
     })
     .inner
 }
+
+/// The colour egui draws selected text, a selected button's label and a focused field's outline
+/// in, on a form: the form's primary colour, unless it all but vanishes on `selected_bg` (below
+/// 1.5:1), as in SolidCraft 95 and CGA where they are the same colour; then the theme's ink for
+/// selected elements (#11804). Every other theme keeps its look. Tokens: `form_primary,
+/// selected_bg, selected_ink`.
+fn selection_ink(t: &Tokens) -> egui::Color32 {
+    if solidcraft_theme::contrast_ratio(t.form_primary, t.selected_bg) >= SELECTION_INK_MIN_CONTRAST { t.form_primary } else { t.selected_ink }
+}
+
+/// Below this contrast with `selected_bg`, a form's primary colour counts as the selection's own
+/// colour (`selection_ink`).
+const SELECTION_INK_MIN_CONTRAST: f64 = 1.5;
 
 /// Compact library cards share search, segment, chip and footer metrics.
 pub(crate) fn catalog_scope<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
@@ -91,14 +103,14 @@ pub(crate) fn catalog_footer(ui: &mut Ui, text: &str) -> Response {
     let icon =
         egui::Rect::from_center_size(egui::pos2(rect.left() + t.space_6, rect.top() + t.space_8 + t.font_small * 0.5), vec2(t.space_12, t.space_12));
     ui.painter().circle_stroke(icon.center(), t.space_4, t.control_border_stroke(t.form_dim));
-    ui.painter().text(icon.center(), egui::Align2::CENTER_CENTER, "i", crate::fonts::semibold(t.font_badge), t.form_dim);
+    ui.painter().text(icon.center(), egui::Align2::CENTER_CENTER, "i", crate::ui_kit::type_face::semibold(t.font_badge), t.form_dim);
     let mut job =
         egui::text::LayoutJob::simple(text.to_owned(), egui::FontId::proportional(t.font_small), t.form_dim, (rect.width() - t.space_24).max(1.0));
     job.wrap.max_rows = 1;
     let galley = ui.painter().layout_job(job);
     ui.painter().galley(rect.left_top() + vec2(t.space_24, t.space_8), galley, t.form_dim);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, ui.is_enabled(), text));
-    crate::scenario::publish_rect("catalog:footer", rect);
+    solidcraft_ui_registry::publish_rect("catalog:footer", rect);
     response
 }
 
@@ -141,7 +153,7 @@ impl CatalogLayout {
             .min_scrolled_height(0.0)
             .auto_shrink([false, false])
             .show(ui, add);
-        scenario::publish_rect(&format!("{}:body", self.key), scroll.inner_rect);
+        solidcraft_ui_registry::publish_rect(&format!("{}:body", self.key), scroll.inner_rect);
         scroll.inner
     }
 
@@ -157,8 +169,8 @@ impl CatalogLayout {
         if (height - self.footer_height).abs() > 0.5 {
             ui.ctx().request_discard("catalog footer measurement changed");
         }
-        scenario::publish_rect(&format!("{}:content", self.key), self.bounds);
-        scenario::publish_rect(&format!("{}:footer", self.key), scroll.inner_rect);
+        solidcraft_ui_registry::publish_rect(&format!("{}:content", self.key), self.bounds);
+        solidcraft_ui_registry::publish_rect(&format!("{}:footer", self.key), scroll.inner_rect);
     }
 }
 
@@ -174,14 +186,14 @@ pub(super) fn publish(ui: &Ui, response: &Response, kind: egui::Role) {
         egui::Role::TextInput => {
             t.input_bevel(ui, response);
             if response.has_focus() {
-                crate::prefs_search::note_key_sink(ui.ctx());
+                super::settings_search::note_key_sink(ui.ctx());
             }
         }
         egui::Role::ComboBox | egui::Role::Button => t.button_bevel(ui, response, false),
         _ => {}
     }
     let label = label(ui);
-    response.widget_info(|| egui::WidgetInfo::labeled(kind, ui.is_enabled(), crate::i18n::tr_label(label)));
+    response.widget_info(|| egui::WidgetInfo::labeled(kind, ui.is_enabled(), solidcraft_ui_text::tr_label(label)));
     publish_geometry(ui, response);
 }
 
@@ -207,8 +219,8 @@ pub(crate) fn status_line(ui: &mut Ui, text: &str, tone: StatusTone) -> Response
         StatusTone::Warning => t.warning,
         StatusTone::Error => t.error,
     };
-    let response = ui.add(egui::Label::new(RichText::new(crate::i18n::tr_label(text)).size(t.font_label).color(ink)).wrap());
-    scenario::publish_rect(&format!("dialog:status:{text}"), response.rect);
+    let response = ui.add(egui::Label::new(RichText::new(solidcraft_ui_text::tr_label(text)).size(t.font_label).color(ink)).wrap());
+    solidcraft_ui_registry::publish_rect(&format!("dialog:status:{text}"), response.rect);
     response
 }
 
@@ -261,33 +273,8 @@ pub(crate) fn choice_row(ui: &mut Ui, label: &str, id: &str, selected: &mut usiz
     row(ui, label, |ui| super::dropdown(ui, id, selected, options))
 }
 
-/// The one control that chooses a continuity order, wherever one is chosen: a dropdown of
-/// `allowed` (what the construction builds, `Construction::offered`). Its labels are the orders'
-/// plain words and its hover text a line per order naming its code, both from the kernel's one
-/// table of orders; a value not in `allowed` shows the first. Tokens: `row, dropdown`.
-pub(crate) fn continuity_row(ui: &mut Ui, label: &str, id: &str, value: &mut Continuity, allowed: &[Continuity]) -> Response {
-    continuity_row_explained(ui, label, id, value, allowed, &continuity_tip(allowed))
-}
-
-/// [`continuity_row`] whose hover text says what each order builds there (`tip`, which names
-/// each order's code), for a choice whose orders stand for constructions (a fillet's corners).
-pub(crate) fn continuity_row_explained(ui: &mut Ui, label: &str, id: &str, value: &mut Continuity, allowed: &[Continuity], tip: &str) -> Response {
-    let labels: Vec<&str> = allowed.iter().map(|g| g.label_id()).collect();
-    let mut index = allowed.iter().position(|g| g == value).unwrap_or(0);
-    let response = choice_row(ui, label, id, &mut index, &labels);
-    if let Some(g) = allowed.get(index) {
-        *value = *g;
-    }
-    response.backing_on_hover_text(tip)
-}
-
-/// The hover text of a continuity choice: each order's own line, which names its code.
-pub(crate) fn continuity_tip(allowed: &[Continuity]) -> String {
-    allowed.iter().map(|g| crate::i18n::tr(g.tip_id())).collect::<Vec<_>>().join("\n")
-}
-
 /// Internal form geometry for controls which need several lines (e.g. text areas).
-pub(super) fn sized_row<R>(ui: &mut Ui, text: &str, height: f32, control: impl FnOnce(&mut Ui) -> R) -> R {
+pub(crate) fn sized_row<R>(ui: &mut Ui, text: &str, height: f32, control: impl FnOnce(&mut Ui) -> R) -> R {
     row_with(ui, text, height, false, |ui, _| control(ui))
 }
 
@@ -299,31 +286,31 @@ fn scrub_row<R>(ui: &mut Ui, text: &str, control: impl FnOnce(&mut Ui, Option<&R
 
 fn row_with<R>(ui: &mut Ui, text: &str, height: f32, scrub: bool, control: impl FnOnce(&mut Ui, Option<&Response>) -> R) -> R {
     let mut passthrough = false;
-    if crate::prefs_search::querying(ui) {
+    if super::settings_search::querying(ui) {
         // A row with no label has no words to match; its controls supply them (#9265).
         let unlabelled = text.is_empty();
         if unlabelled {
-            crate::prefs_search::set_unlabelled_control(ui);
+            super::settings_search::set_unlabelled_control(ui);
         } else {
-            crate::prefs_search::set_control(ui, text);
+            super::settings_search::set_control(ui, text);
         }
-        if !crate::prefs_search::visible(ui, &[text]) {
+        if !super::settings_search::visible(ui, &[text]) {
             if unlabelled {
-                crate::prefs_search::push_unlabelled(ui);
+                super::settings_search::push_unlabelled(ui);
             }
-            let result = crate::prefs_search::run_hidden(ui, text, |ui| control(ui, None));
+            let result = super::settings_search::run_hidden(ui, text, |ui| control(ui, None));
             if unlabelled {
-                crate::prefs_search::pop_unlabelled(ui);
+                super::settings_search::pop_unlabelled(ui);
             }
-            crate::prefs_search::recheck(ui, &[text]);
+            super::settings_search::recheck(ui, &[text]);
             return result;
         }
-        crate::prefs_search::push_passthrough(ui);
+        super::settings_search::push_passthrough(ui);
         passthrough = true;
     }
     let result = sized_row_body(ui, text, height, scrub, control);
     if passthrough {
-        crate::prefs_search::pop_passthrough(ui);
+        super::settings_search::pop_passthrough(ui);
     }
     result
 }
@@ -332,8 +319,8 @@ fn sized_row_body<R>(ui: &mut Ui, text: &str, height: f32, scrub: bool, control:
     let t = Tokens::get();
     let width = dimension(ui.available_width());
     let (rect, _) = ui.allocate_exact_size(vec2(width, height), egui::Sense::hover());
-    crate::prefs_search::remember(ui, text, rect);
-    crate::prefs_search::follow(ui, text, rect);
+    super::settings_search::remember(ui, text, rect);
+    super::settings_search::follow(ui, text, rect);
     // A nested row (`"  Of"`) lines up under the one above: the lookup uses the text without its
     // indent and the indent stays in front of the translation. The `LABEL` tag keeps the original.
     let shown = indented_label(text);
@@ -359,8 +346,8 @@ fn sized_row_body<R>(ui: &mut Ui, text: &str, height: f32, scrub: bool, control:
                     )
                     .inner;
                 let help = super::help_icon(ui, help);
-                scenario::publish_rect(&format!("dialog:row_label:{text}"), label.rect);
-                scenario::publish_rect(&format!("dialog:row_help:{text}"), help.rect);
+                solidcraft_ui_registry::publish_rect(&format!("dialog:row_label:{text}"), label.rect);
+                solidcraft_ui_registry::publish_rect(&format!("dialog:row_help:{text}"), help.rect);
             } else {
                 ui.add(egui::Label::new(RichText::new(shown.clone()).size(t.font_label).color(t.dialog_label)).truncate())
                     .backing_on_hover_text(shown);
@@ -388,10 +375,10 @@ fn sized_row_body<R>(ui: &mut Ui, text: &str, height: f32, scrub: bool, control:
             },
         )
         .inner;
-    scenario::publish_rect(&format!("dialog:row:{text}"), rect);
-    scenario::publish_rect(&format!("dialog:label:{text}"), label_rect);
-    scenario::publish_rect(&format!("dialog:control:{text}"), control_rect);
-    scenario::publish_handle(&format!("dialog:row:{text}"), rect.center());
+    solidcraft_ui_registry::publish_rect(&format!("dialog:row:{text}"), rect);
+    solidcraft_ui_registry::publish_rect(&format!("dialog:label:{text}"), label_rect);
+    solidcraft_ui_registry::publish_rect(&format!("dialog:control:{text}"), control_rect);
+    solidcraft_ui_registry::publish_handle(&format!("dialog:row:{text}"), rect.center());
     result
 }
 
@@ -409,7 +396,7 @@ pub(crate) fn warning_caption(ui: &mut Ui, aligned_to: &str, text: &str) {
 }
 
 fn caption_in(ui: &mut Ui, aligned_to: &str, text: &str, color: egui::Color32) {
-    if crate::prefs_search::suppress_chrome(ui) {
+    if super::settings_search::suppress_chrome(ui) {
         return;
     }
     let t = Tokens::get();
@@ -418,7 +405,7 @@ fn caption_in(ui: &mut Ui, aligned_to: &str, text: &str, color: egui::Color32) {
     let left = (rect.left() + label_column(ui, aligned_to, width) + label_gap(ui, width)).min(rect.right());
     let text_rect = egui::Rect::from_min_max(egui::pos2(left, rect.top()), rect.max);
     paint_text(ui, text_rect, text, egui::FontId::proportional(t.font_small), color, false);
-    scenario::publish_rect(&format!("dialog:caption:{aligned_to}"), text_rect);
+    solidcraft_ui_registry::publish_rect(&format!("dialog:caption:{aligned_to}"), text_rect);
 }
 
 /// Natural-height content aligned beneath an indexed row's control, bounded independently of the form.
@@ -465,7 +452,7 @@ pub(crate) fn figure_rows(
     let mut slots = Vec::with_capacity(fields.len());
     for (label, value) in fields.iter_mut() {
         let caption = egui::Rect::from_min_max(egui::pos2(left, top), egui::pos2(rect.right(), top + t.font_small));
-        paint_text(ui, caption, crate::i18n::tr_label(label), egui::FontId::proportional(t.font_small), t.form_dim, false);
+        paint_text(ui, caption, solidcraft_ui_text::tr_label(label), egui::FontId::proportional(t.font_small), t.form_dim, false);
         let field = egui::Rect::from_min_max(egui::pos2(left, caption.bottom() + t.space_2), egui::pos2(rect.right(), top + slot));
         enter |= ui
             .scope_builder(
@@ -485,8 +472,8 @@ pub(crate) fn figure_rows(
         top += slot + t.space_4;
     }
     paint(ui.painter(), figure, &slots);
-    scenario::publish_rect(&format!("dialog:figure:{id}"), rect);
-    scenario::publish_rect(&format!("dialog:figure_picture:{id}"), figure);
+    solidcraft_ui_registry::publish_rect(&format!("dialog:figure:{id}"), rect);
+    solidcraft_ui_registry::publish_rect(&format!("dialog:figure_picture:{id}"), figure);
     enter
 }
 
@@ -497,8 +484,8 @@ pub(crate) fn figure_rows(
 pub(crate) fn section_heading(ui: &mut Ui, title: &str) {
     let t = Tokens::get();
     let (rect, _) = ui.allocate_exact_size(vec2(dimension(ui.available_width()), t.space_16), egui::Sense::hover());
-    paint_text(ui, rect, &crate::i18n::tr_label(title).to_uppercase(), crate::fonts::semibold(t.font_caption), t.form_dim, true);
-    scenario::publish_rect(&format!("dialog:heading:{title}"), rect);
+    paint_text(ui, rect, &solidcraft_ui_text::tr_label(title).to_uppercase(), crate::ui_kit::type_face::semibold(t.font_caption), t.form_dim, true);
+    solidcraft_ui_registry::publish_rect(&format!("dialog:heading:{title}"), rect);
 }
 
 pub(crate) fn section<R>(ui: &mut Ui, id: impl egui::AsIdSalt, title: &str, default_open: bool, add: impl FnOnce(&mut Ui) -> R) -> Option<R> {
@@ -570,10 +557,10 @@ fn section_with_badge<R>(
     let (count, pending, compact) = badge;
     // A search still walks the body, so a setting inside a folded section can match, without
     // leaving the folded heading on screen for every query.
-    if crate::prefs_search::querying(ui) && crate::prefs_search::suppress_chrome(ui) && !crate::prefs_search::texts_hit(ui, &[title]) {
+    if super::settings_search::querying(ui) && super::settings_search::suppress_chrome(ui) && !super::settings_search::texts_hit(ui, &[title]) {
         return Some(add(ui));
     }
-    let searching = crate::prefs_search::querying(ui);
+    let searching = super::settings_search::querying(ui);
     let t = Tokens::get();
     ui.add_space(t.space_2);
     let id = ui.make_persistent_id(id);
@@ -591,7 +578,7 @@ fn section_with_badge<R>(
         ),
         egui::Sense::click(),
     );
-    crate::prefs_search::follow(ui, title, rect);
+    super::settings_search::follow(ui, title, rect);
     if response.hovered() || response.has_focus() {
         ui.painter().rect_filled(rect.shrink2(vec2(0.0, 1.0)), t.radius_sm, t.hover);
     }
@@ -601,11 +588,11 @@ fn section_with_badge<R>(
     );
     super::disclosure(ui.painter(), icon_rect.center(), open, t.form_dim);
     let text_rect = egui::Rect::from_min_max(egui::pos2((icon_rect.right() + t.form_gap_y).min(rect.right()), rect.top()), rect.max);
-    let caption = crate::i18n::tr_label(title).to_uppercase();
+    let caption = solidcraft_ui_text::tr_label(title).to_uppercase();
     let badge_value = count;
     let badge_width = badge_value.as_ref().map_or(0.0, |value| label_width(ui, value) + t.space_12);
     let reserved = if badge_value.is_some() { badge_width + t.space_12 } else { 0.0 };
-    let mut format = egui::TextFormat::simple(crate::fonts::semibold(t.font_caption), t.form_dim);
+    let mut format = egui::TextFormat::simple(crate::ui_kit::type_face::semibold(t.font_caption), t.form_dim);
     format.extra_letter_spacing = t.font_caption * t.font_section_tracking;
     let title_width = ui
         .fonts_mut(|fonts| fonts.layout_job(egui::text::LayoutJob::single_section(caption.clone(), format)))
@@ -614,7 +601,7 @@ fn section_with_badge<R>(
         .ceil()
         .min((text_rect.width() - reserved).max(0.0));
     let title_rect = egui::Rect::from_min_max(text_rect.min, egui::pos2(text_rect.left() + title_width, text_rect.bottom()));
-    paint_text(ui, title_rect, &caption, crate::fonts::semibold(t.font_caption), t.form_dim, true);
+    paint_text(ui, title_rect, &caption, crate::ui_kit::type_face::semibold(t.font_caption), t.form_dim, true);
     let mut rule_left = title_rect.right() + t.space_12;
     let mut rule_right = rect.right();
     if let Some(value) = badge_value {
@@ -629,7 +616,7 @@ fn section_with_badge<R>(
             egui::FontId::proportional(t.font_small),
             t.form_dim,
         );
-        scenario::publish_rect(&format!("dialog:section:{title}:count"), badge);
+        solidcraft_ui_registry::publish_rect(&format!("dialog:section:{title}:count"), badge);
         if pending {
             rule_right = badge.left() - t.space_12;
         } else {
@@ -639,11 +626,11 @@ fn section_with_badge<R>(
     if rule_left < rule_right {
         t.secondary_hline(ui.painter(), rule_left..=rule_right, rect.center().y, t.dialog_rule);
     }
-    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::DisclosureTriangle, ui.is_enabled(), open, crate::i18n::tr_label(title)));
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::DisclosureTriangle, ui.is_enabled(), open, solidcraft_ui_text::tr_label(title)));
     // A disclosure says whether it is open as expanded, as egui's own collapsing header does.
     ui.ctx().accesskit_node_builder(response.id, |node| node.set_expanded(open));
-    scenario::publish_handle(&format!("dialog:section:{title}"), response.rect.center());
-    scenario::publish_rect(&format!("dialog:section:{title}"), rect);
+    solidcraft_ui_registry::publish_handle(&format!("dialog:section:{title}"), response.rect.center());
+    solidcraft_ui_registry::publish_rect(&format!("dialog:section:{title}"), rect);
     if response.clicked() && !pending && !searching {
         open = !open;
     }
@@ -666,13 +653,13 @@ fn section_with_badge<R>(
 pub(crate) fn search_fold<R>(ui: &mut Ui, title: &str, count: usize, add: impl FnOnce(&mut Ui) -> R) -> Option<R> {
     let t = Tokens::get();
     let id = egui::Id::unique(("prefs_search_fold", title));
-    let query = crate::prefs_search::query(ui);
+    let query = super::settings_search::query(ui);
     let mut open = ui.data(|data| data.get_temp::<bool>(id)).unwrap_or(false);
     let previous = ui.data(|data| data.get_temp::<String>(id.with("query"))).unwrap_or_default();
     if previous != query {
         open = false;
     }
-    crate::prefs_search::reveal(ui);
+    super::settings_search::reveal(ui);
     ui.add_space(t.space_2);
     let (rect, response) = ui.allocate_exact_size(vec2(dimension(ui.available_width()), row_height()), egui::Sense::click());
     if response.hovered() || response.has_focus() {
@@ -688,7 +675,7 @@ pub(crate) fn search_fold<R>(ui: &mut Ui, title: &str, count: usize, add: impl F
     let badge_value = count.to_string();
     let badge_width = label_width(ui, &badge_value) + t.space_12;
     let reserved = badge_width + t.space_12;
-    let mut format = egui::TextFormat::simple(crate::fonts::semibold(t.font_caption), t.form_dim);
+    let mut format = egui::TextFormat::simple(crate::ui_kit::type_face::semibold(t.font_caption), t.form_dim);
     format.extra_letter_spacing = t.font_caption * t.font_section_tracking;
     let title_width = ui
         .fonts_mut(|fonts| fonts.layout_job(egui::text::LayoutJob::single_section(caption.clone(), format)))
@@ -697,7 +684,7 @@ pub(crate) fn search_fold<R>(ui: &mut Ui, title: &str, count: usize, add: impl F
         .ceil()
         .min((text_rect.width() - reserved).max(0.0));
     let title_rect = egui::Rect::from_min_max(text_rect.min, egui::pos2(text_rect.left() + title_width, text_rect.bottom()));
-    paint_text(ui, title_rect, &caption, crate::fonts::semibold(t.font_caption), t.form_dim, true);
+    paint_text(ui, title_rect, &caption, crate::ui_kit::type_face::semibold(t.font_caption), t.form_dim, true);
     let mut rule_left = title_rect.right() + t.space_12;
     let width = badge_width.min((rect.right() - rule_left).max(0.0));
     let badge = egui::Rect::from_min_size(egui::pos2(rule_left.min(rect.right()), rect.center().y - t.space_10), vec2(width, t.space_10 * 2.0));
@@ -717,8 +704,8 @@ pub(crate) fn search_fold<R>(ui: &mut Ui, title: &str, count: usize, add: impl F
     response.widget_info(|| egui::WidgetInfo::selected(egui::Role::DisclosureTriangle, ui.is_enabled(), open, &accessible));
     // A disclosure says whether it is open as expanded, as egui's own collapsing header does.
     ui.ctx().accesskit_node_builder(response.id, |node| node.set_expanded(open));
-    scenario::publish_rect("prefs:search:shortcuts", rect);
-    scenario::publish_handle("prefs:search:shortcuts", response.rect.center());
+    solidcraft_ui_registry::publish_rect("prefs:search:shortcuts", rect);
+    solidcraft_ui_registry::publish_handle("prefs:search:shortcuts", response.rect.center());
     if response.clicked() {
         open = !open;
     }
@@ -727,9 +714,9 @@ pub(crate) fn search_fold<R>(ui: &mut Ui, title: &str, count: usize, add: impl F
         data.insert_temp(id, open);
     });
     open.then(|| {
-        crate::prefs_search::push_force(ui);
+        super::settings_search::push_force(ui);
         let result = add(ui);
-        crate::prefs_search::pop_force(ui);
+        super::settings_search::pop_force(ui);
         result
     })
 }
@@ -745,20 +732,20 @@ pub(crate) fn list_row(ui: &mut Ui, key: &str, text: &str) -> Response {
     let label = egui::Rect::from_min_max(rect.min, egui::pos2((remove.left() - t.space_8).max(rect.left()), rect.bottom()));
     paint_text(ui, label, text, egui::FontId::proportional(t.font_label), t.form_ink, false);
     let response = ui.push_id(key, |ui| super::icon_button_at(ui, remove, "close", "Remove")).inner;
-    scenario::publish_rect(&format!("dialog:list:{key}"), rect);
-    scenario::publish_handle(&format!("dialog:list:{key}:remove"), remove.center());
+    solidcraft_ui_registry::publish_rect(&format!("dialog:list:{key}"), rect);
+    solidcraft_ui_registry::publish_handle(&format!("dialog:list:{key}:remove"), remove.center());
     response.union(row)
 }
 
 /// Full-width rule; Tokens: dialog_rule. Use between groups without extra padding.
 /// Full-width rule without extra padding. Tokens: `dialog_rule`.
 pub(crate) fn divider(ui: &mut Ui, key: &str) {
-    if crate::prefs_search::suppress_chrome(ui) {
+    if super::settings_search::suppress_chrome(ui) {
         return;
     }
     let (rect, _) = ui.allocate_exact_size(vec2(dimension(ui.available_width()), 1.0), egui::Sense::hover());
     Tokens::get().secondary_hline(ui.painter(), rect.x_range(), rect.top(), Tokens::get().dialog_rule);
-    scenario::publish_rect(&format!("dialog:divider:{key}"), rect);
+    solidcraft_ui_registry::publish_rect(&format!("dialog:divider:{key}"), rect);
 }
 
 /// Give a compound row's subfield its accessible name without allocating layout space.
@@ -771,12 +758,12 @@ pub(crate) fn named_control<R>(ui: &mut Ui, label: &str, add: impl FnOnce(&mut U
 /// Publish geometry without replacing native accessibility. Tokens: `none`.
 pub(super) fn publish_geometry(ui: &Ui, response: &Response) {
     let label = label(ui);
-    scenario::publish_rect(&format!("dialog:widget:{label}"), response.rect);
+    solidcraft_ui_registry::publish_rect(&format!("dialog:widget:{label}"), response.rect);
     // A click lands where the field shows: a field scrolled out of a dialog's field area, under
     // its footer, has no handle (a click at its centre would press the button over it).
     let shown = response.rect.intersect(ui.clip_rect());
     if shown.is_positive() {
-        scenario::publish_handle(&format!("dialog:{label}"), shown.center());
+        solidcraft_ui_registry::publish_handle(&format!("dialog:{label}"), shown.center());
     }
 }
 
@@ -797,7 +784,7 @@ pub(crate) fn text_lines(ui: &mut Ui, id: &str, text: &str) {
             ui.add(egui::Label::new(RichText::new(*line).font(font.clone()).color(t.form_ink)).truncate()).backing_on_hover_text(*line);
         }
     });
-    scenario::publish_rect(&format!("dialog:lines:{id}"), response.inner_rect);
+    solidcraft_ui_registry::publish_rect(&format!("dialog:lines:{id}"), response.inner_rect);
 }
 
 /// Read-only text variants retain their original wrapping, allocation and scenario identities.
@@ -836,21 +823,41 @@ pub(crate) fn name_cell_with_hint(ui: &mut Ui, name: &str, strong: bool, hint: &
     text_impl(ui, name, Text::NameCell(strong), Some(hint))
 }
 
+/// A value cell that puts its text on the clipboard when clicked (the Properties card's values,
+/// #12218), in the monospaced cell font when `mono`. Its tooltip is `hint`, with the whole value
+/// only if the cell clips it; `name` is what it reads as, the value with what it is ("Mass:
+/// 12.500 g"). True on the click that copied.
+pub(crate) fn copy_cell(ui: &mut Ui, value: &str, name: &str, mono: bool, hint: &str) -> bool {
+    let response = text_impl(ui, value, if mono { Text::MonoCell } else { Text::Cell }, Some(hint));
+    // A copy control rather than a label: it reads as a button, and keyboard focus shows a ring
+    // (Enter or Space copies, as a click does).
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), name));
+    if response.has_focus() {
+        let t = Tokens::get();
+        ui.painter().rect_stroke(response.rect, t.radius_sm, egui::Stroke::new(1.0, t.form_primary), egui::StrokeKind::Inside);
+    }
+    let copied = response.clicked();
+    if copied {
+        ui.ctx().copy_text(value.to_owned());
+    }
+    copied
+}
+
 fn text_impl(ui: &mut Ui, text: &str, style: Text<'_>, hover_hint: Option<&str>) -> Response {
-    if crate::prefs_search::querying(ui) {
+    if super::settings_search::querying(ui) {
         let heading = matches!(style, Text::Heading(_));
         if heading {
-            let hit = crate::prefs_search::texts_hit(ui, &[text]);
-            crate::prefs_search::set_heading_open(ui, hit);
+            let hit = super::settings_search::texts_hit(ui, &[text]);
+            super::settings_search::set_heading_open(ui, hit);
             if hit {
-                crate::prefs_search::reveal(ui);
-            } else if crate::prefs_search::suppress_chrome(ui) {
-                return crate::prefs_search::hidden_response(ui);
+                super::settings_search::reveal(ui);
+            } else if super::settings_search::suppress_chrome(ui) {
+                return super::settings_search::hidden_response(ui);
             }
-        } else if crate::prefs_search::suppress_chrome(ui) && !crate::prefs_search::texts_hit(ui, &[text]) {
-            return crate::prefs_search::hidden_response(ui);
-        } else if crate::prefs_search::texts_hit(ui, &[text]) && !crate::prefs_search::shows_all(ui) {
-            crate::prefs_search::reveal(ui);
+        } else if super::settings_search::suppress_chrome(ui) && !super::settings_search::texts_hit(ui, &[text]) {
+            return super::settings_search::hidden_response(ui);
+        } else if super::settings_search::texts_hit(ui, &[text]) && !super::settings_search::shows_all(ui) {
+            super::settings_search::reveal(ui);
         }
     }
     let t = Tokens::get();
@@ -863,10 +870,10 @@ fn text_impl(ui: &mut Ui, text: &str, style: Text<'_>, hover_hint: Option<&str>)
         _ => t.form_ink,
     };
     let font = match style {
-        Text::Inline if in_catalog(ui) => crate::fonts::semibold(t.font_small),
-        Text::NameCell(true) | Text::SelectedNameCell => crate::fonts::semibold(t.font_label),
-        Text::NameCell(false) => crate::fonts::medium(t.font_label),
-        Text::Heading(_) => crate::fonts::semibold(t.font_button),
+        Text::Inline if in_catalog(ui) => crate::ui_kit::type_face::semibold(t.font_small),
+        Text::NameCell(true) | Text::SelectedNameCell => crate::ui_kit::type_face::semibold(t.font_label),
+        Text::NameCell(false) => crate::ui_kit::type_face::medium(t.font_label),
+        Text::Heading(_) => crate::ui_kit::type_face::semibold(t.font_button),
         Text::MonoCell | Text::Value(_, _) => egui::FontId::monospace(t.font_body),
         Text::MonoNote(_) => egui::FontId::monospace(t.font_small),
         Text::Hint(_) | Text::Error(_) => egui::FontId::proportional(t.font_body),
@@ -922,13 +929,13 @@ fn text_impl(ui: &mut Ui, text: &str, style: Text<'_>, hover_hint: Option<&str>)
         Text::Cell | Text::MonoCell | Text::NameCell(_) | Text::SelectedNameCell => ("cell", text),
     };
     let id = format!("dialog:{kind}:{key}");
-    scenario::publish_rect(&id, response.rect);
+    solidcraft_ui_registry::publish_rect(&id, response.rect);
     if matches!(style, Text::Heading(_)) {
-        crate::prefs_search::remember(ui, text, response.rect);
-        crate::prefs_search::follow(ui, text, response.rect);
+        super::settings_search::remember(ui, text, response.rect);
+        super::settings_search::follow(ui, text, response.rect);
     }
     if !matches!(style, Text::Note(_) | Text::MonoNote(_)) {
-        scenario::publish_handle(&id, response.rect.center());
+        solidcraft_ui_registry::publish_handle(&id, response.rect.center());
     }
     response
 }
@@ -942,7 +949,7 @@ pub(crate) fn summary_row(ui: &mut Ui, name: &str, summary: &str, enabled: &mut 
     let check = egui::Rect::from_min_size(rect.min + vec2(t.space_6, 0.0), vec2(t.space_24, rect.height()));
     let changed = ui
         .scope_builder(egui::UiBuilder::new().max_rect(check).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
-            super::checkbox(ui, "", enabled).backing_on_hover_text(crate::i18n::tr_label("Enable rule")).changed()
+            super::checkbox(ui, "", enabled).backing_on_hover_text(solidcraft_ui_text::tr_label("Enable rule")).changed()
         })
         .inner;
     let right = (rect.right() - dimension(actions_width) - t.space_6).max(check.right());
@@ -952,12 +959,12 @@ pub(crate) fn summary_row(ui: &mut Ui, name: &str, summary: &str, enabled: &mut 
     );
     let title = egui::Rect::from_min_max(text.min, egui::pos2(text.right(), text.center().y));
     let detail = egui::Rect::from_min_max(egui::pos2(text.left(), text.center().y), text.max);
-    paint_text(ui, title, name, crate::fonts::semibold(t.font_label), t.form_ink, false);
+    paint_text(ui, title, name, crate::ui_kit::type_face::semibold(t.font_label), t.form_ink, false);
     paint_text(ui, detail, summary, egui::FontId::proportional(t.font_small), t.form_dim, false);
     let response = ui.interact(text, ui.scope_id().with("summary"), egui::Sense::hover()).backing_on_hover_text(summary);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, ui.is_enabled(), format!("{name}: {summary}")));
-    scenario::publish_rect(&format!("dialog:inline:{name}"), title);
-    scenario::publish_rect("dialog:report:rule_report", detail);
+    solidcraft_ui_registry::publish_rect(&format!("dialog:inline:{name}"), title);
+    solidcraft_ui_registry::publish_rect("dialog:report:rule_report", detail);
     ui.scope_builder(
         egui::UiBuilder::new()
             .max_rect(egui::Rect::from_min_max(egui::pos2(right, rect.top()), rect.max))
@@ -965,4 +972,53 @@ pub(crate) fn summary_row(ui: &mut Ui, name: &str, summary: &str, enabled: &mut 
         actions,
     );
     changed
+}
+
+#[cfg(test)]
+mod selection_ink_tests {
+    use super::selection_ink;
+    use solidcraft_theme::{Tokens, contrast_ratio};
+
+    /// Selected text in a form field stands out from the selection in every built-in theme
+    /// (#11804): none draws it in the selection's own colour.
+    #[test]
+    fn selected_form_text_reads_in_every_built_in_theme() {
+        let mut themes = vec![("Dark".to_string(), Tokens::dark()), ("Light".to_string(), Tokens::light())];
+        themes.extend(crate::theme_files::builtin().iter().map(|theme| (theme.id.clone(), crate::theme_files::resolve(theme))));
+        let mut failures = Vec::new();
+        for (name, t) in &themes {
+            let ratio = contrast_ratio(selection_ink(t), t.selected_bg);
+            if ratio < 2.0 {
+                failures.push(format!("{name}: {ratio:.2}:1"));
+            }
+        }
+        assert!(failures.is_empty(), "selected form text below 2:1 on selected_bg:\n{}", failures.join("\n"));
+    }
+
+    /// Themes whose primary colour stands out from the selection keep it, Dark and Light
+    /// included; SolidCraft 95 and CGA, where it is the selection colour itself, take the ink for
+    /// selected elements.
+    #[test]
+    fn only_themes_whose_primary_vanishes_switch_to_the_selected_ink() {
+        crate::test_support::host_data();
+        for t in [Tokens::dark(), Tokens::light()] {
+            assert_eq!(selection_ink(&t), t.form_primary);
+        }
+        let mut switched: Vec<&str> = crate::theme_files::builtin()
+            .iter()
+            .filter(|theme| {
+                let t = crate::theme_files::resolve(theme);
+                selection_ink(&t) != t.form_primary
+            })
+            .map(|theme| theme.id.as_str())
+            .collect();
+        switched.sort_unstable();
+        assert_eq!(switched, ["cga", "solidcraft-95"]);
+        for id in ["solidcraft-95", "cga"] {
+            let theme = crate::theme_files::builtin().iter().find(|theme| theme.id == id).unwrap();
+            let t = crate::theme_files::resolve(theme);
+            assert_eq!(t.form_primary, t.selected_bg, "{id}");
+            assert_eq!(selection_ink(&t), t.selected_ink, "{id}");
+        }
+    }
 }

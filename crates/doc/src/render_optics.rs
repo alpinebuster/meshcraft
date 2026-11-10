@@ -6,10 +6,8 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use solidcore_record::Vec3;
-use solidcraft_render::{
-    surface::OpaqueSurface,
-    transmission::{Transmission, subsurface::Subsurface},
-};
+use solidcraft_render::transmission::{Transmission, subsurface::Subsurface};
+use solidcraft_viewport::surface::OpaqueSurface;
 use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,6 +21,8 @@ pub enum OpticalBoundary {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct OpticalMaterial {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<solidcraft_render::glass_model::GlassModel>,
     pub ior: f64,
     pub absorption_per_mm: [f64; 3],
     pub boundary: OpticalBoundary,
@@ -32,7 +32,15 @@ pub struct OpticalMaterial {
 }
 impl Default for OpticalMaterial {
     fn default() -> Self {
-        Self { ior: 1.5, absorption_per_mm: [0.0; 3], boundary: Default::default(), thickness_mm: 0.0, shadow_transmission: false, subsurface: None }
+        Self {
+            model: None,
+            ior: 1.5,
+            absorption_per_mm: [0.0; 3],
+            boundary: Default::default(),
+            thickness_mm: 0.0,
+            shadow_transmission: false,
+            subsurface: None,
+        }
     }
 }
 impl OpticalMaterial {
@@ -44,6 +52,9 @@ impl OpticalMaterial {
     /// General closed boundaries require the explicit finite progressive path.
     pub fn validate_for_cpu_path(self, path: bool) -> Result<()> {
         self.validate()?;
+        if self.model.is_some() && !path {
+            return Err(DocError::Invalid("advanced Glass models require CPU Indirect lighting".into()));
+        }
         if self.shadow_transmission && (!path || self.boundary != OpticalBoundary::ThinSheet) {
             return Err(DocError::Invalid(
                 "CPU transmissive shadows require Indirect lighting and a thin sheet; closed refractive light connections remain unsupported".into(),
@@ -70,6 +81,7 @@ impl OpticalMaterial {
             return Err(DocError::Invalid("CPU optical target requires a bounded captured body name".into()));
         }
         Ok(solidcraft_render::job::DielectricOptions {
+            model: self.model,
             subsurface: self.subsurface,
             shadow_transmission: self.shadow_transmission,
             body_index,
@@ -87,6 +99,12 @@ impl OpticalMaterial {
 
     pub fn validate(self) -> Result<()> {
         let error = |message: String| DocError::Invalid(message);
+        if let Some(model) = self.model {
+            model.validate(self.ior).map_err(|e| error(e.to_string()))?;
+            if self.boundary == OpticalBoundary::ThinSheet && self.shadow_transmission && model.roughness > 0.0 {
+                return Err(error("rough thin-sheet Glass requires disabled straight transmitted shadows".into()));
+            }
+        }
         OpaqueSurface::new(Vec3::ZERO, 0.0, 0.5, self.ior).map_err(|e| error(e.to_string()))?;
         if self.boundary != OpticalBoundary::ThinSheet && self.thickness_mm != 0.0 {
             return Err(error("closed optical thickness comes from geometry; thickness_mm must be zero".into()));
@@ -127,8 +145,8 @@ impl OpticalBindings {
         self.0.iter()
     }
     pub fn validate(&self) -> Result<()> {
-        if self.0.len() > 32 || self.0.capacity() > 32 {
-            return Err(DocError::Invalid("at most 32 portable optical targets".into()));
+        if self.0.len() > solidcraft_render::job::MAX_OPTICAL_TARGETS || self.0.capacity() > solidcraft_render::job::MAX_OPTICAL_TARGETS {
+            return Err(DocError::Invalid("at most 128 portable optical targets".into()));
         }
         let mut seen = BTreeSet::new();
         for binding in &self.0 {
@@ -144,7 +162,7 @@ impl OpticalBindings {
     }
     pub fn validate_for_cpu_path(&self, path: bool) -> Result<()> {
         self.validate()?;
-        if self.len() > 8 {
+        if !path && self.len() > 8 {
             return Err(DocError::Invalid("CPU supports at most eight certified optical targets".into()));
         }
         for binding in self.iter() {
@@ -163,11 +181,11 @@ impl OpticalBindings {
             }
             *old = binding;
         } else {
-            if self.0.len() >= 32 {
-                return Err(DocError::Invalid("at most 32 portable optical targets".into()));
+            if self.0.len() >= solidcraft_render::job::MAX_OPTICAL_TARGETS {
+                return Err(DocError::Invalid("at most 128 portable optical targets".into()));
             }
             self.0.try_reserve_exact(1).map_err(|_| DocError::Invalid("optical binding reservation failed".into()))?;
-            if self.0.capacity() > 32 {
+            if self.0.capacity() > solidcraft_render::job::MAX_OPTICAL_TARGETS {
                 return Err(DocError::Invalid("optical capacity exceeds its bound".into()));
             }
             self.0.push(binding);
@@ -182,9 +200,88 @@ impl OpticalBindings {
 }
 impl<'de> Deserialize<'de> for OpticalBindings {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
-        let result = Self(bounded_sequence::<D, SavedOptics, 32>(d)?);
+        let result = Self(bounded_sequence::<D, SavedOptics, { solidcraft_render::job::MAX_OPTICAL_TARGETS }>(d)?);
         result.validate().map_err(serde::de::Error::custom)?;
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod advanced_model_contract_tests {
+    use super::*;
+    use solidcraft_render::glass_model::{Dispersion, GlassModel, ThinFilm};
+    #[test]
+    fn portable_optics_keep_128_targets_and_legacy_cpu_keeps_its_explicit_limit() {
+        let mut bindings = OpticalBindings::default();
+        for feature in 1..=solidcraft_render::job::MAX_OPTICAL_TARGETS {
+            let binding = SavedOptics {
+                target: RenderBodyTarget { definition: "OPUS".into(), feature: feature as u64, component: 0, occurrence_path: Vec::new() },
+                optics: OpticalMaterial::default(),
+            };
+            bindings.set(binding, false).unwrap();
+        }
+        bindings.validate_for_cpu_path(true).unwrap();
+        assert!(bindings.validate_for_cpu().is_err());
+        let raw = serde_json::to_value(&bindings).unwrap();
+        assert_eq!(serde_json::from_value::<OpticalBindings>(raw.clone()).unwrap(), bindings);
+        let mut too_many = raw.as_array().unwrap().clone();
+        too_many.push(too_many[0].clone());
+        assert!(serde_json::from_value::<OpticalBindings>(serde_json::Value::Array(too_many)).is_err());
+    }
+
+    #[test]
+    fn advanced_optics_keep_every_authored_number_through_saved_and_cpu_lowering() {
+        let model = GlassModel {
+            roughness: 0.27,
+            dispersion: Some(Dispersion { abbe_number: 45.0 }),
+            thin_film: Some(ThinFilm { ior: 1.36, thickness_nm: 420.0 }),
+        };
+        let optics = OpticalMaterial { model: Some(model), ..Default::default() };
+        let wire = serde_json::to_value(optics).unwrap();
+        assert_eq!(serde_json::from_value::<OpticalMaterial>(wire.clone()).unwrap(), optics);
+        assert_eq!(optics.to_cpu_for_path(2, "Original Glass", true).unwrap().model, Some(model));
+        assert!(optics.to_cpu(2, "Original Glass").is_err());
+        assert_eq!(serde_json::to_value(optics).unwrap(), wire);
+        assert!(serde_json::to_value(OpticalMaterial::default()).unwrap().get("model").is_none());
+        let sheet = OpticalMaterial {
+            model: Some(GlassModel { roughness: 0.0, ..model }),
+            boundary: OpticalBoundary::ThinSheet,
+            shadow_transmission: true,
+            ..optics
+        };
+        sheet.validate_for_cpu_path(true).unwrap();
+        assert!(OpticalMaterial { model: Some(model), ..sheet }.validate().is_err());
+    }
+    #[test]
+    fn caustic_quality_is_portable_between_both_saved_jobs_and_runtime_requests() {
+        use crate::render_job::{CpuJob, GpuJob};
+        let caustics = Some(solidcraft_render::job::CausticOptions {
+            photons: 8192,
+            radius_mm: 0.4,
+            max_depth: 12,
+            seed: 381,
+            area_lights: false,
+            environment: false,
+            guided_emission: true,
+            refresh_per_pass: true,
+            power_weighted_sources: true,
+        });
+        let cpu = CpuJob {
+            caustics,
+            environment_importance_sampling: true,
+            path: Some(Default::default()),
+            progressive: Some(Default::default()),
+            ..Default::default()
+        };
+        let gpu = GpuJob { caustics, ..Default::default() };
+        assert_eq!(cpu.to_runtime(0.0).unwrap().caustics, caustics);
+        assert!(cpu.to_runtime(0.0).unwrap().environment_importance_sampling);
+        assert_eq!(gpu.to_runtime(0.0).unwrap().caustics, caustics);
+        assert_eq!(serde_json::from_value::<CpuJob>(serde_json::to_value(&cpu).unwrap()).unwrap(), cpu);
+        assert_eq!(serde_json::from_value::<GpuJob>(serde_json::to_value(&gpu).unwrap()).unwrap(), gpu);
+        assert!(serde_json::to_value(CpuJob::default()).unwrap().get("caustics").is_none());
+        assert!(serde_json::to_value(CpuJob::default()).unwrap().get("environment_importance_sampling").is_none());
+        assert!(serde_json::to_value(GpuJob::default()).unwrap().get("caustics").is_none());
     }
 }
 #[cfg(test)]

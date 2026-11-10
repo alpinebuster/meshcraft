@@ -1,16 +1,16 @@
-use crate::theme::Tokens;
 use crate::ui_kit::metrics::dimension;
 use crate::ui_kit::test_support::*;
 use crate::ui_kit::*;
+use solidcraft_theme::Tokens;
 
-use crate::scenario;
+use solidcraft_ui_registry as registry;
 
 #[test]
 fn non_finite_and_tiny_row_widths_are_sanitized() {
     assert_eq!(dimension(f32::NAN), 0.0);
     assert_eq!(dimension(f32::INFINITY), 0.0);
     assert_eq!(dimension(-10.0), 0.0);
-    let ctx = crate::fonts::test_context();
+    let ctx = crate::ui_kit::test_support::context();
     for width in [0.0, 1.0, 12.0] {
         frame(&ctx, vec![], |ui| {
             ui.set_width(width);
@@ -19,7 +19,7 @@ fn non_finite_and_tiny_row_widths_are_sanitized() {
                 field(ui, &mut value);
             });
         });
-        assert!(scenario::rect_of("dialog:row:Tiny").unwrap().is_finite());
+        assert!(registry::rect_of("dialog:row:Tiny").unwrap().is_finite());
     }
 }
 
@@ -28,8 +28,7 @@ fn a_growing_form_widens_past_the_cap_and_publishes_the_card_extra() {
     // #10620: inside `grow_form` the label column takes the width the widest label needs,
     // past the 1.6x cap an ordinary form clamps to, and the card's owner is told by how much
     // the card must widen so the control column keeps its room.
-    let ctx = egui::Context::default();
-    crate::fonts::setup_fonts(&ctx);
+    let ctx = crate::ui_kit::test_support::context();
     let t = Tokens::get();
     let key = egui::Id::unique("grow-test");
     let long = "Anpassung an Leitkurve";
@@ -43,7 +42,7 @@ fn a_growing_form_widens_past_the_cap_and_publishes_the_card_extra() {
             });
         });
         output.textures_delta.clear();
-        label = scenario::rect_of(&format!("dialog:label:{long}"));
+        label = registry::rect_of(&format!("dialog:label:{long}"));
     }
     let label = label.unwrap();
     let measured = ctx.fonts_mut(|f| f.layout_no_wrap(long.to_owned(), egui::FontId::proportional(t.font_label), t.dialog_label)).size().x;
@@ -55,24 +54,24 @@ fn a_growing_form_widens_past_the_cap_and_publishes_the_card_extra() {
 
 #[test]
 fn file_tiles_are_fixed_height_bounded_and_disabled_actions_stay_inert() {
-    let ctx = crate::fonts::test_context();
+    let ctx = crate::ui_kit::test_support::context();
     for width in [80.0, 264.0, 680.0] {
         frame(&ctx, vec![], |ui| {
             ui.set_width(width);
             let tile = FileView::action_tile(ui, "file:new", width, "new", "New design", "Millimetres", true);
-            assert_eq!(tile.rect.height(), crate::theme::Tokens::get().file_tile_height);
+            assert_eq!(tile.rect.height(), solidcraft_theme::Tokens::get().file_tile_height);
             assert!(tile.rect.width() <= width);
             let row = FileView::nav_row(ui, "file:save", "Save", "Ctrl+S", false, false);
             assert!(!row.enabled());
             assert!(!row.clicked());
-            assert_eq!(row.rect.height(), crate::theme::Tokens::get().file_nav_height);
+            assert_eq!(row.rect.height(), solidcraft_theme::Tokens::get().file_nav_height);
         });
     }
 }
 
 #[test]
 fn file_grid_has_only_between_row_gaps_and_recovery_actions_fit_narrow_widths() {
-    let ctx = crate::fonts::test_context();
+    let ctx = crate::ui_kit::test_support::context();
     frame(&ctx, vec![], |ui| {
         ui.set_width(280.0);
         let mut rects = Vec::new();
@@ -81,9 +80,11 @@ fn file_grid_has_only_between_row_gaps_and_recovery_actions_fit_narrow_widths() 
         FileView::grid(ui, "grid", 240.0, 2, |ui, _, width| {
             rects.push(FileView::action_tile(ui, "tile", width, "new", "New", "Millimetres", true).rect);
         });
-        assert!((rects[1].top() - rects[0].bottom() - crate::theme::Tokens::get().file_grid_gap).abs() < 0.1);
+        assert!((rects[1].top() - rects[0].bottom() - solidcraft_theme::Tokens::get().file_grid_gap).abs() < 0.1);
         assert!(
-            (ui.cursor().top() - before - 2.0 * crate::theme::Tokens::get().file_tile_height - crate::theme::Tokens::get().file_grid_gap).abs() < 0.1
+            (ui.cursor().top() - before - 2.0 * solidcraft_theme::Tokens::get().file_tile_height - solidcraft_theme::Tokens::get().file_grid_gap)
+                .abs()
+                < 0.1
         );
         let (recover, discard) = FileView::recovery_banner(
             ui,
@@ -107,7 +108,7 @@ fn file_grid_has_only_between_row_gaps_and_recovery_actions_fit_narrow_widths() 
 
 #[test]
 fn file_grid_cells_use_vertical_layout_even_inside_a_horizontal_parent() {
-    let ctx = crate::fonts::test_context();
+    let ctx = crate::ui_kit::test_support::context();
     frame(&ctx, vec![], |ui| {
         ui.set_width(680.0);
         let mut rects = Vec::new();
@@ -128,15 +129,15 @@ fn file_grid_cells_use_vertical_layout_even_inside_a_horizontal_parent() {
 
 #[test]
 fn sample_grid_stretches_each_row_without_clipping_long_descriptions() {
-    let ctx = crate::fonts::test_context();
+    let ctx = crate::ui_kit::test_support::context();
     let mut cards = Vec::new();
     let mut output = ctx.run_ui(
         egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(680.0, 600.0))), ..Default::default() },
         |ui| {
             ui.set_width(680.0);
             cards = FileView::sample_grid(ui, "samples", &[
-                SampleCard { title: "Plate", description: "Short description", icon: "new", thumbnail: None },
-                SampleCard { title: "Enclosure", description: "Long descriptive sample text that wraps across several lines while preserving every word through the final marker.", icon: "new", thumbnail: None },
+                SampleCard { title: "Plate", description: "Short description", icon: "new".into(), thumbnail: None },
+                SampleCard { title: "Enclosure", description: "Long descriptive sample text that wraps across several lines while preserving every word through the final marker.", icon: "new".into(), thumbnail: None },
             ]);
         },
     );
@@ -155,4 +156,13 @@ fn sample_grid_stretches_each_row_without_clipping_long_descriptions() {
     let text_rect = egui::Rect::from_min_size(long.1.pos, long.1.galley.size());
     assert!(cards[1].rect.contains_rect(text_rect));
     assert!(long.0.contains_rect(text_rect), "the complete description must fit its clip");
+}
+
+#[test]
+fn a_tile_taller_than_its_text_area_keeps_the_title_at_the_top() {
+    // #7483: centring a title and a two-row caption taller than the tile put the title's top
+    // above the tile, where it was clipped.
+    let area = egui::Rect::from_min_max(egui::pos2(0.0, 16.0), egui::pos2(100.0, 68.0));
+    assert_eq!(crate::ui_kit::file_view::text_top(area, 40.0), 22.0, "a group that fits is centred");
+    assert_eq!(crate::ui_kit::file_view::text_top(area, 60.0), 16.0, "a taller group starts at the top");
 }
