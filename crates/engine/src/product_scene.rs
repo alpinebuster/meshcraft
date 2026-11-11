@@ -112,7 +112,7 @@ mod tests {
             ("sketch.dimension", json!({"entities":["l2"],"value":15})),
             ("sketch.finish", json!({})),
             ("solid.extrude", json!({"distance":5})),
-            ("sketch.edit", json!({"sketch":"Sketch1"})),
+            ("sketch.edit", json!({"sketch":"Sketch1","restore_marker":false})),
             ("sketch.drag", json!({"entity":"l1.start","from":[5,5],"to":[4,5],"live":true})),
         ] {
             s.execute(id, &p).unwrap();
@@ -179,7 +179,7 @@ mod tests {
         let body = crate::kernel::box_solid(Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0))
             .unwrap()
             .with_color(Some([0.2, 0.6, 0.8]))
-            .with_paint(Some(crate::kernel::Paint { opacity: 0.4, faces: Vec::new() }));
+            .with_paint(Some(crate::kernel::Paint { opacity: 0.4, faces: Vec::new(), name: None }));
         let step = crate::kernel::step_export_bodies(
             &[crate::kernel::ExportBody { name: "Imported glass".into(), body: &body, color: body.color() }],
             &Default::default(),
